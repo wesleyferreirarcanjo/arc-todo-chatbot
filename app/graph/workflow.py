@@ -26,10 +26,13 @@ def build_chat_graph(runtime: ChatbotRuntimeSettings):
     async def response_node(state: ChatGraphState) -> ChatGraphState:
         return await response_agent(state, runtime)
 
+    async def tools_node(state: ChatGraphState) -> ChatGraphState:
+        return await todo_tools_agent(state, runtime)
+
     graph.add_node("context_agent", context_agent)
     graph.add_node("scope_discovery_agent", scope_discovery_agent)
     graph.add_node("planner_agent", planner_node)
-    graph.add_node("todo_tools_agent", todo_tools_agent)
+    graph.add_node("todo_tools_agent", tools_node)
     graph.add_node("response_agent", response_node)
 
     graph.add_edge(START, "context_agent")

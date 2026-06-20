@@ -34,7 +34,7 @@ Available tools:
 - create_task {"organization_id": string|null, "project_id": string|null, "title": string, "description": string|null, "status": "todo"|"in_progress"|"done", "criticity": "low"|"medium"|"high"|"critical", "due_date": string|null}
 - create_tasks {"organization_id": string|null, "project_id": string|null, "tasks": [{"title": string, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}]} — create multiple tasks in one request
 - update_task {"organization_id": string, "project_id": string, "task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}
-- update_tasks {"task_ids": string[]|null, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null} — apply the same update fields to multiple selected tasks; omit task_ids to use all taskIds from Selected task context
+- update_tasks {"task_ids": string[]|null, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "tasks": [{"task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}]|null} — for multiple selected tasks, prefer a tasks array with one entry per task_id when values differ (especially descriptions); shared fields may apply to all only when every task should get the same value
 - move_task {"task_id": string, "target_project_id": string|null, "target_project_hint": string|null} — move one selected task to another project; use organization_id/project_id from Selected task context for the task's current location
 - move_tasks {"task_ids": string[]|null, "target_project_id": string|null, "target_project_hint": string|null} — move multiple selected tasks to another project
 - delete_task {"organization_id": string, "project_id": string, "task_id": string}
@@ -43,6 +43,7 @@ Available tools:
 Use get_tasks, update_tasks, move_tasks, or delete_tasks (not the single-task variants) when the user wants to act on more than one selected task.
 Use move_tasks (not move_task) when the user wants to move more than one selected task.
 When Selected task context is present, keep the task in its current organization_id/project_id and only change the destination project for move requests.
+When Selected task context lists multiple tasks and the user asks to add or create descriptions, return update_tasks with a tasks array containing a distinct description for each task_id based on that task's title.
 Use create_tasks (not create_task) when the user asks to create more than one task.
 Use route "direct" for greetings, general help, or when no API action is needed.
 Prefer provided organization_id and project_id context when present; omit organization_id/project_id from tool_arguments when context is already provided.
@@ -890,6 +891,13 @@ def resolve_update_tasks_arguments(
     task_refs: list[dict[str, str]],
     latest_user_message: str = "",
 ) -> dict[str, Any]:
+    per_task = _build_per_task_updates_from_arguments(
+        arguments=arguments,
+        task_refs=task_refs,
+    )
+    if per_task:
+        return {"tasks": per_task}
+
     task_ids = _batch_task_ids(
         arguments=arguments,
         task_refs=task_refs,
@@ -905,6 +913,134 @@ def resolve_update_tasks_arguments(
         for scope in _batch_task_scopes(task_ids, task_refs)
     ]
     return {"tasks": tasks}
+
+
+def _build_per_task_updates_from_arguments(
+    *,
+    arguments: dict[str, Any],
+    task_refs: list[dict[str, str]],
+) -> list[dict[str, Any]] | None:
+    raw_tasks = arguments.get("tasks")
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        return None
+
+    ref_by_id = {
+        task_id: ref
+        for ref in task_refs
+        if (task_id := _ref_task_id(ref))
+    }
+    merged: list[dict[str, Any]] = []
+    for item in raw_tasks:
+        if not isinstance(item, dict):
+            continue
+        task_id = item.get("task_id") or item.get("taskId")
+        if not isinstance(task_id, str) or task_id not in ref_by_id:
+            continue
+        scope = _batch_task_scopes([task_id], task_refs)[0]
+        fields = {
+            key: item[key]
+            for key in UPDATE_TASK_FIELDS
+            if key in item and item[key] is not None
+        }
+        if fields:
+            merged.append({**scope, **fields})
+
+    return merged or None
+
+
+async def _generate_per_task_descriptions(
+    runtime: ChatbotRuntimeSettings,
+    *,
+    message: str,
+    task_refs: list[dict[str, str]],
+) -> dict[str, str]:
+    model = build_model(runtime)
+    task_lines = "\n".join(
+        f"- task_id={task_id} title={ref.get('title') or 'Untitled'}"
+        for ref in task_refs
+        if (task_id := _ref_task_id(ref))
+    )
+    result = await model.ainvoke(
+        [
+            SystemMessage(
+                content=(
+                    "Write a distinct task description for each task id based on its title "
+                    "and the user request. Return JSON only in the shape "
+                    '{"descriptions":{"<task_id>":"<description>"}}. '
+                    "Each description must be specific to that task's title. "
+                    "Do not reuse the same description text."
+                )
+            ),
+            HumanMessage(content=f"User request:\n{message}\n\nTasks:\n{task_lines}"),
+        ]
+    )
+    payload = _extract_json(str(result.content))
+    descriptions = payload.get("descriptions")
+    if not isinstance(descriptions, dict):
+        return {}
+    return {
+        str(task_id): str(description).strip()
+        for task_id, description in descriptions.items()
+        if description
+    }
+
+
+async def resolve_update_tasks_arguments_async(
+    runtime: ChatbotRuntimeSettings | None,
+    *,
+    arguments: dict[str, Any],
+    task_refs: list[dict[str, str]],
+    latest_user_message: str = "",
+) -> dict[str, Any]:
+    per_task = _build_per_task_updates_from_arguments(
+        arguments=arguments,
+        task_refs=task_refs,
+    )
+    if per_task:
+        return {"tasks": per_task}
+
+    task_ids = _batch_task_ids(
+        arguments=arguments,
+        task_refs=task_refs,
+        latest_user_message=latest_user_message,
+    )
+    scopes = _batch_task_scopes(task_ids, task_refs)
+    updates = {
+        key: arguments[key]
+        for key in UPDATE_TASK_FIELDS
+        if key in arguments and arguments[key] is not None
+    }
+
+    wants_descriptions = "description" in updates or bool(
+        re.search(r"\b(?:description|detail|note)\b", latest_user_message, re.I)
+    )
+    if len(scopes) > 1 and runtime and wants_descriptions:
+        generated = await _generate_per_task_descriptions(
+            runtime,
+            message=latest_user_message,
+            task_refs=task_refs,
+        )
+        tasks: list[dict[str, Any]] = []
+        for scope in scopes:
+            task_id = scope["task_id"]
+            description = generated.get(task_id)
+            if not description:
+                ref = next(
+                    (ref for ref in task_refs if _ref_task_id(ref) == task_id),
+                    None,
+                )
+                title = (ref or {}).get("title") or "Task"
+                description = f"Scope: {title}."
+            payload = {**scope, "description": description}
+            for key, value in updates.items():
+                if key != "description":
+                    payload[key] = value
+            tasks.append(payload)
+        return {"tasks": tasks}
+
+    return {
+        "tasks": [{**scope, **updates} for scope in scopes],
+    }
 
 
 def resolve_get_tasks_arguments(
@@ -979,7 +1115,6 @@ async def resolve_move_tasks_arguments(
 
 BATCH_TOOL_RESOLVERS = {
     "get_tasks": resolve_get_tasks_arguments,
-    "update_tasks": resolve_update_tasks_arguments,
     "delete_tasks": resolve_delete_tasks_arguments,
 }
 
@@ -1057,7 +1192,10 @@ async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) 
     }
 
 
-async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
+async def todo_tools_agent(
+    state: ChatGraphState,
+    runtime: ChatbotRuntimeSettings | None = None,
+) -> ChatGraphState:
     tool_name = state.get("tool_name")
     if not tool_name:
         return {**state, "error": "Planner did not select a tool"}
@@ -1117,12 +1255,18 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
         latest_user_message
     ):
         tool_name = "update_tasks"
-        arguments = {
-            key: arguments[key]
-            for key in UPDATE_TASK_FIELDS
-            if key in arguments and arguments[key] is not None
-        }
-        arguments.setdefault("task_ids", None)
+        if isinstance(arguments.get("tasks"), list):
+            arguments = {
+                "tasks": arguments["tasks"],
+                "task_ids": arguments.get("task_ids"),
+            }
+        else:
+            arguments = {
+                key: arguments[key]
+                for key in UPDATE_TASK_FIELDS
+                if key in arguments and arguments[key] is not None
+            }
+            arguments.setdefault("task_ids", None)
 
     tool_name, arguments = _coerce_mutation_tool(state, tool_name, arguments)
 
@@ -1172,6 +1316,13 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
                 }
             else:
                 arguments = move_arguments
+        elif tool_name == "update_tasks":
+            arguments = await resolve_update_tasks_arguments_async(
+                runtime,
+                arguments=arguments,
+                task_refs=task_refs,
+                latest_user_message=latest_user_message,
+            )
         elif tool_name in BATCH_TOOL_RESOLVERS:
             arguments = BATCH_TOOL_RESOLVERS[tool_name](
                 arguments=arguments,

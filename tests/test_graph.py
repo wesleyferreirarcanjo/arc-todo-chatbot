@@ -17,6 +17,7 @@ from app.graph.nodes import (
     resolve_move_tasks_arguments,
     resolve_scope_arguments,
     resolve_update_tasks_arguments,
+    resolve_update_tasks_arguments_async,
     route_after_context,
     route_after_planner,
     route_after_scope_discovery,
@@ -291,7 +292,7 @@ def test_resolve_get_tasks_arguments_uses_all_refs_for_bulk_intent():
 
 
 def test_batch_tool_resolvers_cover_selected_task_actions():
-    assert set(BATCH_TOOL_RESOLVERS) == {"get_tasks", "update_tasks", "delete_tasks"}
+    assert set(BATCH_TOOL_RESOLVERS) == {"get_tasks", "delete_tasks"}
 
 
 @pytest.mark.asyncio
@@ -651,6 +652,97 @@ def test_resolve_update_tasks_arguments_uses_all_refs_for_description_update():
     assert all(task["description"] == "Updated scope" for task in result["tasks"])
 
 
+def test_resolve_update_tasks_arguments_uses_per_task_payloads():
+    task_refs = [
+        {
+            "taskId": "t1",
+            "organizationId": "org1",
+            "projectId": "proj1",
+            "title": "make assistant smarter",
+        },
+        {
+            "taskId": "t2",
+            "organizationId": "org1",
+            "projectId": "proj1",
+            "title": "repositories link connect",
+        },
+    ]
+
+    result = resolve_update_tasks_arguments(
+        arguments={
+            "tasks": [
+                {"task_id": "t1", "description": "History limit to 50 interactions."},
+                {"task_id": "t2", "description": "Link repos to tasks."},
+            ],
+        },
+        task_refs=task_refs,
+    )
+
+    assert result["tasks"] == [
+        {
+            "organization_id": "org1",
+            "project_id": "proj1",
+            "task_id": "t1",
+            "description": "History limit to 50 interactions.",
+        },
+        {
+            "organization_id": "org1",
+            "project_id": "proj1",
+            "task_id": "t2",
+            "description": "Link repos to tasks.",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_update_tasks_arguments_async_generates_distinct_descriptions():
+    task_refs = [
+        {
+            "taskId": "t1",
+            "organizationId": "org1",
+            "projectId": "proj1",
+            "title": "make assistant smarter",
+        },
+        {
+            "taskId": "t2",
+            "organizationId": "org1",
+            "projectId": "proj1",
+            "title": "repositories link connect",
+        },
+        {
+            "taskId": "t3",
+            "organizationId": "org1",
+            "projectId": "proj2",
+            "title": "rag system for the assistant",
+        },
+    ]
+    runtime = MagicMock()
+
+    with patch(
+        "app.graph.nodes._generate_per_task_descriptions",
+        new=AsyncMock(
+            return_value={
+                "t1": "Increase conversation history to 50 interactions or 100k tokens.",
+                "t2": "Connect repository links to tasks.",
+                "t3": "Add a RAG system for the assistant.",
+            }
+        ),
+    ):
+        result = await resolve_update_tasks_arguments_async(
+            runtime,
+            arguments={"task_ids": None, "description": "placeholder"},
+            task_refs=task_refs,
+            latest_user_message="create a description for this tasks",
+        )
+
+    descriptions = [task["description"] for task in result["tasks"]]
+    assert len(descriptions) == 3
+    assert len(set(descriptions)) == 3
+    assert descriptions[0].startswith("Increase conversation history")
+    assert descriptions[1].startswith("Connect repository links")
+    assert descriptions[2].startswith("Add a RAG system")
+
+
 def test_create_mutation_routes_through_scope_discovery():
     assert route_after_context({"latest_user_message": "create a task in arc-todo project"}) == "scope_discovery_agent"
     assert route_after_context(
@@ -861,7 +953,16 @@ async def test_todo_tools_agent_update_description_does_not_call_create_tasks():
     ), patch(
         "app.graph.nodes.execute_todo_tool",
         new=AsyncMock(return_value={"updated": ["t1", "t2", "t3"], "results": [], "failed": []}),
-    ) as execute_mock:
+    ) as execute_mock, patch(
+        "app.graph.nodes._generate_per_task_descriptions",
+        new=AsyncMock(
+            return_value={
+                "t1": "Increase conversation history to 50 interactions or 100k tokens.",
+                "t2": "Connect repository links to tasks.",
+                "t3": "Add a RAG system for the assistant.",
+            }
+        ),
+    ):
         state = await todo_tools_agent(
             {
                 "user_token": "token",
@@ -895,12 +996,16 @@ async def test_todo_tools_agent_update_description_does_not_call_create_tasks():
                     },
                 ],
                 "used_tools": [],
-            }
+            },
+            runtime=MagicMock(),
         )
 
     execute_mock.assert_awaited_once()
     assert execute_mock.await_args.args[1] == "update_tasks"
-    assert len(execute_mock.await_args.args[2]["tasks"]) == 3
+    tasks = execute_mock.await_args.args[2]["tasks"]
+    assert len(tasks) == 3
+    descriptions = [task["description"] for task in tasks]
+    assert len(set(descriptions)) == 3
     assert state["error"] is None
 
 
