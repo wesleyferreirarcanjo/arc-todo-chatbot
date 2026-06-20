@@ -119,6 +119,7 @@ class TodoTools:
         status: str | None = None,
         criticity: str | None = None,
         due_date: str | None = None,
+        new_project_id: str | None = None,
     ) -> Any:
         body: dict[str, Any] = {}
         if title is not None:
@@ -131,6 +132,8 @@ class TodoTools:
             body["criticity"] = criticity
         if due_date is not None:
             body["dueDate"] = due_date
+        if new_project_id is not None:
+            body["projectId"] = new_project_id
         return await self._client.request(
             "PATCH",
             f"/organizations/{organization_id}/projects/{project_id}/tasks/{task_id}",
@@ -210,6 +213,46 @@ class TodoTools:
                 failed.append({"task_id": task_id, "error": str(exc)})
         return {"updated": updated, "results": results, "failed": failed}
 
+    async def move_task(
+        self,
+        *,
+        organization_id: str,
+        project_id: str,
+        task_id: str,
+        target_project_id: str,
+    ) -> Any:
+        return await self.update_task(
+            organization_id=organization_id,
+            project_id=project_id,
+            task_id=task_id,
+            new_project_id=target_project_id,
+        )
+
+    async def move_tasks(
+        self,
+        *,
+        tasks: list[dict[str, str]],
+    ) -> Any:
+        moved: list[Any] = []
+        failed: list[dict[str, str]] = []
+        for task in tasks:
+            task_id = task["task_id"]
+            target_project_id = task.get("target_project_id")
+            if not target_project_id:
+                failed.append({"task_id": task_id, "error": "Missing target project"})
+                continue
+            try:
+                result = await self.move_task(
+                    organization_id=task["organization_id"],
+                    project_id=task["project_id"],
+                    task_id=task_id,
+                    target_project_id=target_project_id,
+                )
+                moved.append(result)
+            except Exception as exc:
+                failed.append({"task_id": task_id, "error": str(exc)})
+        return {"moved": moved, "failed": failed}
+
     async def get_tasks(
         self,
         *,
@@ -264,6 +307,10 @@ async def execute_todo_tool(
             return await tools.update_task(**arguments)
         if tool_name == "update_tasks":
             return await tools.update_tasks(tasks=arguments["tasks"])
+        if tool_name == "move_task":
+            return await tools.move_task(**arguments)
+        if tool_name == "move_tasks":
+            return await tools.move_tasks(tasks=arguments["tasks"])
         if tool_name == "delete_task":
             return await tools.delete_task(**arguments)
         if tool_name == "delete_tasks":

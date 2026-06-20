@@ -35,10 +35,14 @@ Available tools:
 - create_tasks {"organization_id": string|null, "project_id": string|null, "tasks": [{"title": string, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}]} — create multiple tasks in one request
 - update_task {"organization_id": string, "project_id": string, "task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}
 - update_tasks {"task_ids": string[]|null, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null} — apply the same update fields to multiple selected tasks; omit task_ids to use all taskIds from Selected task context
+- move_task {"task_id": string, "target_project_id": string|null, "target_project_hint": string|null} — move one selected task to another project; use organization_id/project_id from Selected task context for the task's current location
+- move_tasks {"task_ids": string[]|null, "target_project_id": string|null, "target_project_hint": string|null} — move multiple selected tasks to another project
 - delete_task {"organization_id": string, "project_id": string, "task_id": string}
 - delete_tasks {"task_ids": string[]|null} — delete multiple selected tasks; omit task_ids to use all taskIds from Selected task context
 
-Use get_tasks, update_tasks, or delete_tasks (not the single-task variants) when the user wants to act on more than one selected task.
+Use get_tasks, update_tasks, move_tasks, or delete_tasks (not the single-task variants) when the user wants to act on more than one selected task.
+Use move_tasks (not move_task) when the user wants to move more than one selected task.
+When Selected task context is present, keep the task in its current organization_id/project_id and only change the destination project for move requests.
 Use create_tasks (not create_task) when the user asks to create more than one task.
 Use route "direct" for greetings, general help, or when no API action is needed.
 Prefer provided organization_id and project_id context when present; omit organization_id/project_id from tool_arguments when context is already provided.
@@ -55,6 +59,8 @@ MUTATION_TOOLS = {
     "create_tasks",
     "update_task",
     "update_tasks",
+    "move_task",
+    "move_tasks",
     "delete_task",
     "delete_tasks",
 }
@@ -164,6 +170,43 @@ def _ref_project_id(ref: dict[str, str]) -> str | None:
     return ref.get("projectId") or ref.get("project_id")
 
 
+def _apply_task_ref_source_scope(
+    arguments: dict[str, Any],
+    task_refs: list[dict[str, str]],
+) -> dict[str, Any]:
+    if not task_refs:
+        return arguments
+
+    resolved = dict(arguments)
+    task_id = resolved.get("task_id")
+    if task_id:
+        for ref in task_refs:
+            if _ref_task_id(ref) != task_id:
+                continue
+            org_id = _ref_organization_id(ref)
+            project_id = _ref_project_id(ref)
+            if _is_uuid(org_id):
+                resolved["organization_id"] = org_id
+            if _is_uuid(project_id):
+                resolved["project_id"] = project_id
+            break
+        return resolved
+
+    if len(task_refs) == 1:
+        ref = task_refs[0]
+        org_id = _ref_organization_id(ref)
+        project_id = _ref_project_id(ref)
+        task_ref_id = _ref_task_id(ref)
+        if _is_uuid(org_id):
+            resolved["organization_id"] = org_id
+        if _is_uuid(project_id):
+            resolved["project_id"] = project_id
+        if task_ref_id and not resolved.get("task_id"):
+            resolved["task_id"] = task_ref_id
+
+    return resolved
+
+
 def _looks_like_bulk_selected(message: str) -> bool:
     return bool(re.search(r"\b(all|these|selected|them)\b", message, re.I))
 
@@ -171,12 +214,30 @@ def _looks_like_bulk_selected(message: str) -> bool:
 def _looks_like_task_mutation(message: str) -> bool:
     return bool(
         re.search(
-            r"\b(create|add|make|new|update|delete|remove|mark|complete)\b.*\btasks?\b"
-            r"|\btasks?\b.*\b(create|add|make|new|update|delete|remove|mark|complete)\b",
+            r"\b(create|add|make|new|update|delete|remove|mark|complete|move)\b.*\btasks?\b"
+            r"|\btasks?\b.*\b(create|add|make|new|update|delete|remove|mark|complete|move)\b"
+            r"|\bmove\b.*\bto\b",
             message,
             re.I,
         )
     )
+
+
+def _looks_like_move_mutation(message: str) -> bool:
+    return bool(re.search(r"\bmove\b", message, re.I))
+
+
+def _extract_move_target_hint(message: str) -> str | None:
+    for pattern in (
+        r"\bmove\s+(?:this\s+)?(?:task\s+)?to\s+(.+?)\s*\.?\s*$",
+        r"\bto\s+([a-z0-9][a-z0-9\s-]+)\s*\.?\s*$",
+    ):
+        match = re.search(pattern, message, re.I | re.M)
+        if match:
+            hint = match.group(1).strip()
+            if len(hint) >= 2:
+                return hint
+    return None
 
 
 def _looks_like_multi_create(message: str) -> bool:
@@ -223,6 +284,10 @@ def _mutation_succeeded(state: ChatGraphState) -> bool | None:
         return bool(result.get("id"))
     if tool_name == "update_tasks":
         return len(result.get("updated", [])) > 0 and not result.get("failed")
+    if tool_name == "move_task":
+        return bool(result.get("id"))
+    if tool_name == "move_tasks":
+        return len(result.get("moved", [])) > 0 and not result.get("failed")
     if tool_name == "delete_task":
         return True
     if tool_name == "delete_tasks":
@@ -381,6 +446,8 @@ def _coerce_mutation_tool(
     message = state.get("latest_user_message", "")
     if not _looks_like_task_mutation(message):
         return tool_name, arguments
+    if _looks_like_move_mutation(message):
+        return tool_name, arguments
 
     titles = _parse_create_task_titles(message)
     org_hint, project_hints = _extract_all_scope_hints(message)
@@ -415,8 +482,12 @@ def _batch_task_ids(
     latest_user_message: str = "",
 ) -> list[str]:
     task_ids = arguments.get("task_ids")
-    if task_ids is None and _looks_like_bulk_selected(latest_user_message) and task_refs:
-        return [tid for ref in task_refs if (tid := _ref_task_id(ref))]
+    if task_ids is None and task_refs:
+        if len(task_refs) == 1:
+            only_id = _ref_task_id(task_refs[0])
+            return [only_id] if only_id else []
+        if _looks_like_bulk_selected(latest_user_message):
+            return [tid for ref in task_refs if (tid := _ref_task_id(ref))]
     if task_ids is None:
         return []
     return list(task_ids)
@@ -457,6 +528,7 @@ SINGLE_TO_BATCH_TOOL = {
     "get_task": "get_tasks",
     "update_task": "update_tasks",
     "delete_task": "delete_tasks",
+    "move_task": "move_tasks",
 }
 
 UUID_PATTERN = re.compile(
@@ -471,6 +543,17 @@ SCOPE_TOOLS = {
     "list_projects",
     "get_task",
     "delete_task",
+}
+
+EXISTING_TASK_TOOLS = {
+    "get_task",
+    "get_tasks",
+    "update_task",
+    "update_tasks",
+    "move_task",
+    "move_tasks",
+    "delete_task",
+    "delete_tasks",
 }
 
 
@@ -648,7 +731,7 @@ async def resolve_scope_arguments(
     arguments: dict[str, Any],
     state: ChatGraphState,
 ) -> dict[str, Any]:
-    if tool_name not in SCOPE_TOOLS:
+    if tool_name not in SCOPE_TOOLS or tool_name in EXISTING_TASK_TOOLS:
         return arguments
 
     resolved = dict(arguments)
@@ -809,6 +892,62 @@ def resolve_get_tasks_arguments(
     return {"tasks": _batch_task_scopes(task_ids, task_refs)}
 
 
+async def resolve_move_tasks_arguments(
+    tools: TodoTools,
+    *,
+    arguments: dict[str, Any],
+    task_refs: list[dict[str, str]],
+    latest_user_message: str = "",
+) -> dict[str, Any]:
+    task_ids = _batch_task_ids(
+        arguments=arguments,
+        task_refs=task_refs,
+        latest_user_message=latest_user_message,
+    )
+    scopes = _batch_task_scopes(task_ids, task_refs)
+    if not scopes:
+        return {"tasks": []}
+
+    target_hint = (
+        arguments.get("target_project_hint")
+        if isinstance(arguments.get("target_project_hint"), str)
+        else None
+    ) or _extract_move_target_hint(latest_user_message)
+    target_project_id = arguments.get("target_project_id")
+    if not _is_uuid(target_project_id):
+        target_project_id = None
+
+    if not target_project_id and target_hint:
+        source_org_id = scopes[0].get("organization_id")
+        scope_result = await tools.resolve_scope(
+            organization_hint=None,
+            project_hint=target_hint,
+            message=latest_user_message,
+        )
+        if scope_result.get("status") == "resolved":
+            project = scope_result.get("project") or {}
+            organization = scope_result.get("organization") or {}
+            resolved_project_id = project.get("id")
+            resolved_org_id = organization.get("id")
+            if _is_uuid(resolved_project_id):
+                target_project_id = resolved_project_id
+            if _is_uuid(resolved_org_id) and _is_uuid(source_org_id):
+                if resolved_org_id != source_org_id:
+                    raise ArcTodoApiError(
+                        "Target project must be in the same organization as the selected task"
+                    )
+
+    if not target_project_id:
+        raise ArcTodoApiError("Could not resolve target project for move")
+
+    return {
+        "tasks": [
+            {**scope, "target_project_id": target_project_id}
+            for scope in scopes
+        ]
+    }
+
+
 BATCH_TOOL_RESOLVERS = {
     "get_tasks": resolve_get_tasks_arguments,
     "update_tasks": resolve_update_tasks_arguments,
@@ -931,14 +1070,32 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
             first_ref.get("projectId") or first_ref.get("project_id"),
         )
 
-    tool_name, arguments = _coerce_mutation_tool(state, tool_name, arguments)
-
     task_refs = state.get("task_refs", [])
     latest_user_message = state.get("latest_user_message", "")
+    if task_refs and tool_name in EXISTING_TASK_TOOLS:
+        arguments = _apply_task_ref_source_scope(arguments, task_refs)
+
+    if task_refs and _looks_like_move_mutation(latest_user_message):
+        tool_name = "move_tasks"
+        arguments = {
+            key: value
+            for key, value in arguments.items()
+            if key in {"task_ids", "target_project_id", "target_project_hint"}
+        }
+        arguments.setdefault("task_ids", None)
+
+    tool_name, arguments = _coerce_mutation_tool(state, tool_name, arguments)
+
+    if task_refs and tool_name in EXISTING_TASK_TOOLS:
+        arguments = _apply_task_ref_source_scope(arguments, task_refs)
+
     if (
         tool_name in SINGLE_TO_BATCH_TOOL
         and len(task_refs) > 1
-        and _looks_like_bulk_selected(latest_user_message)
+        and (
+            _looks_like_bulk_selected(latest_user_message)
+            or _looks_like_move_mutation(latest_user_message)
+        )
     ):
         # ponytail: heuristic upgrade when planner picks single-task tool for bulk intent
         batch_arguments = dict(arguments)
@@ -946,16 +1103,41 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
         tool_name = SINGLE_TO_BATCH_TOOL[tool_name]
         arguments = batch_arguments
 
-    if tool_name in BATCH_TOOL_RESOLVERS:
-        arguments = BATCH_TOOL_RESOLVERS[tool_name](
-            arguments=arguments,
-            task_refs=task_refs,
-            latest_user_message=latest_user_message,
-        )
-
     client = ArcTodoClient(user_token=state["user_token"])
     tools = TodoTools(client)
     try:
+        if tool_name in {"move_task", "move_tasks"}:
+            move_arguments = await resolve_move_tasks_arguments(
+                tools,
+                arguments=arguments,
+                task_refs=task_refs,
+                latest_user_message=latest_user_message,
+            )
+            if tool_name == "move_task":
+                tasks = move_arguments.get("tasks") or []
+                if len(tasks) != 1:
+                    return {
+                        **state,
+                        "tool_result": None,
+                        "used_tools": list(state.get("used_tools", [])),
+                        "error": "Could not resolve selected task for move",
+                    }
+                task = tasks[0]
+                arguments = {
+                    "organization_id": task["organization_id"],
+                    "project_id": task["project_id"],
+                    "task_id": task["task_id"],
+                    "target_project_id": task["target_project_id"],
+                }
+            else:
+                arguments = move_arguments
+        elif tool_name in BATCH_TOOL_RESOLVERS:
+            arguments = BATCH_TOOL_RESOLVERS[tool_name](
+                arguments=arguments,
+                task_refs=task_refs,
+                latest_user_message=latest_user_message,
+            )
+
         arguments = await resolve_scope_arguments(
             tools,
             tool_name=tool_name,

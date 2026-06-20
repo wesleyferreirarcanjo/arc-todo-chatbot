@@ -4,13 +4,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.graph.nodes import (
     BATCH_TOOL_RESOLVERS,
     context_agent,
+    _apply_task_ref_source_scope,
     _best_scope_match,
     _build_mutation_failure_response,
     _catalog_from_scope_result,
     _coerce_mutation_tool,
     _extract_all_scope_hints,
+    _extract_move_target_hint,
+    _looks_like_move_mutation,
     resolve_delete_tasks_arguments,
     resolve_get_tasks_arguments,
+    resolve_move_tasks_arguments,
     resolve_scope_arguments,
     resolve_update_tasks_arguments,
     route_after_context,
@@ -710,3 +714,132 @@ def test_catalog_from_scope_result_includes_candidates():
     assert catalog["status"] == "ambiguous"
     assert len(catalog["candidates"]) == 1
     assert catalog["organizations"][0]["slug"] == "arc-todo"
+
+
+def test_apply_task_ref_source_scope_overrides_wrong_project():
+    arguments = _apply_task_ref_source_scope(
+        {
+            "task_id": "869f737f-412f-4ffb-b70c-c528c067e630",
+            "organization_id": "org-target",
+            "project_id": "proj-target",
+        },
+        [
+            {
+                "taskId": "869f737f-412f-4ffb-b70c-c528c067e630",
+                "organizationId": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+                "projectId": "11111111-1111-4111-8111-111111111111",
+                "title": "bug verify",
+            }
+        ],
+    )
+    assert arguments["organization_id"] == "4797da9c-f611-4bb8-b736-849a824c5fbc"
+    assert arguments["project_id"] == "11111111-1111-4111-8111-111111111111"
+
+
+def test_extract_move_target_hint():
+    assert _extract_move_target_hint("arc-todo bug verify move to arc-todo") == "arc-todo"
+    assert _looks_like_move_mutation("move to arc-todo")
+
+
+@pytest.mark.asyncio
+async def test_resolve_move_tasks_arguments_uses_task_ref_and_target_project():
+    tools = MagicMock()
+    tools.resolve_scope = AsyncMock(
+        return_value={
+            "status": "resolved",
+            "organization": {
+                "id": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+                "name": "Arc Todo",
+                "slug": "arc-todo",
+            },
+            "project": {
+                "id": "22222222-2222-4222-8222-222222222222",
+                "name": "arc-todo",
+                "organizationId": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+            },
+        }
+    )
+
+    result = await resolve_move_tasks_arguments(
+        tools,
+        arguments={"task_ids": None},
+        task_refs=[
+            {
+                "taskId": "869f737f-412f-4ffb-b70c-c528c067e630",
+                "organizationId": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+                "projectId": "11111111-1111-4111-8111-111111111111",
+                "title": "bug verify",
+            }
+        ],
+        latest_user_message="arc-todo bug verify move to arc-todo",
+    )
+
+    assert result["tasks"] == [
+        {
+            "organization_id": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+            "project_id": "11111111-1111-4111-8111-111111111111",
+            "task_id": "869f737f-412f-4ffb-b70c-c528c067e630",
+            "target_project_id": "22222222-2222-4222-8222-222222222222",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_todo_tools_agent_move_task_uses_source_scope_from_task_ref():
+    mock_tools = MagicMock()
+    mock_tools.resolve_scope = AsyncMock(
+        return_value={
+            "status": "resolved",
+            "organization": {
+                "id": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+                "name": "Arc Todo",
+                "slug": "arc-todo",
+            },
+            "project": {
+                "id": "22222222-2222-4222-8222-222222222222",
+                "name": "arc-todo",
+                "organizationId": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+            },
+        }
+    )
+
+    with patch("app.graph.nodes.ArcTodoClient"), patch(
+        "app.graph.nodes.TodoTools",
+        return_value=mock_tools,
+    ), patch(
+        "app.graph.nodes.execute_todo_tool",
+        new=AsyncMock(return_value={"id": "869f737f-412f-4ffb-b70c-c528c067e630"}),
+    ) as execute_mock:
+        state = await todo_tools_agent(
+            {
+                "user_token": "token",
+                "tool_name": "update_task",
+                "tool_arguments": {
+                    "task_id": "869f737f-412f-4ffb-b70c-c528c067e630",
+                    "organization_id": "22222222-2222-4222-8222-222222222222",
+                    "project_id": "22222222-2222-4222-8222-222222222222",
+                },
+                "latest_user_message": "arc-todo bug verify move to arc-todo",
+                "task_refs": [
+                    {
+                        "taskId": "869f737f-412f-4ffb-b70c-c528c067e630",
+                        "organizationId": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+                        "projectId": "11111111-1111-4111-8111-111111111111",
+                        "title": "bug verify",
+                    }
+                ],
+                "used_tools": [],
+            }
+        )
+
+    execute_mock.assert_awaited_once()
+    assert execute_mock.await_args.args[1] == "move_tasks"
+    assert execute_mock.await_args.args[2]["tasks"] == [
+        {
+            "organization_id": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+            "project_id": "11111111-1111-4111-8111-111111111111",
+            "task_id": "869f737f-412f-4ffb-b70c-c528c067e630",
+            "target_project_id": "22222222-2222-4222-8222-222222222222",
+        }
+    ]
+    assert state["error"] is None
