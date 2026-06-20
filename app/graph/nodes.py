@@ -181,10 +181,37 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
         return {**state, "error": "Planner did not select a tool"}
 
     arguments = dict(state.get("tool_arguments") or {})
-    if state.get("organization_id") and "organization_id" not in arguments:
+    if not arguments.get("organization_id") and state.get("organization_id"):
         arguments["organization_id"] = state["organization_id"]
-    if state.get("project_id") and "project_id" not in arguments:
+    if not arguments.get("project_id") and state.get("project_id"):
         arguments["project_id"] = state["project_id"]
+
+    task_id = arguments.get("task_id")
+    if task_id and (
+        not arguments.get("organization_id") or not arguments.get("project_id")
+    ):
+        for ref in state.get("task_refs", []):
+            ref_task_id = ref.get("taskId") or ref.get("task_id")
+            if ref_task_id != task_id:
+                continue
+            if not arguments.get("organization_id"):
+                arguments["organization_id"] = ref.get("organizationId") or ref.get(
+                    "organization_id"
+                )
+            if not arguments.get("project_id"):
+                arguments["project_id"] = ref.get("projectId") or ref.get("project_id")
+            break
+
+    if not arguments.get("organization_id") and state.get("task_refs"):
+        first_ref = state["task_refs"][0]
+        arguments.setdefault(
+            "organization_id",
+            first_ref.get("organizationId") or first_ref.get("organization_id"),
+        )
+        arguments.setdefault(
+            "project_id",
+            first_ref.get("projectId") or first_ref.get("project_id"),
+        )
 
     client = ArcTodoClient(user_token=state["user_token"])
     tools = TodoTools(client)
