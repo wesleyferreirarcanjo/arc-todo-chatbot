@@ -656,8 +656,34 @@ def test_create_mutation_routes_through_scope_discovery():
     assert route_after_context(
         {"latest_user_message": "add description for this task"}
     ) == "planner_agent"
+    assert route_after_context(
+        {
+            "latest_user_message": (
+                "make assistant smater and... repositories link connect... "
+                "rag system for the assiss... create a description for this tasks"
+            )
+        }
+    ) == "planner_agent"
     assert not _looks_like_create_mutation("add description for this task")
     assert _looks_like_update_mutation("add description for this task")
+    assert _looks_like_update_mutation(
+        "make assistant smater create a description for this tasks"
+    )
+    assert _parse_create_task_titles(
+        "make assistant smater create a description for this tasks"
+    ) == []
+    tool_name, coerced = _coerce_mutation_tool(
+        {
+            "latest_user_message": (
+                "make assistant smater create a description for this tasks"
+            ),
+            "task_refs": [{"taskId": "t1", "organizationId": "org1", "projectId": "p1", "title": "x"}],
+        },
+        "update_tasks",
+        {"task_ids": None, "description": "smarter assistant"},
+    )
+    assert tool_name == "update_tasks"
+    assert coerced["description"] == "smarter assistant"
     assert route_after_scope_discovery(
         {
             "latest_user_message": "create a task in arc-todo project",
@@ -820,6 +846,62 @@ async def test_resolve_move_tasks_arguments_uses_task_ref_and_target_project():
             "target_project_id": "22222222-2222-4222-8222-222222222222",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_todo_tools_agent_update_description_does_not_call_create_tasks():
+    mock_tools = MagicMock()
+    mock_tools.update_tasks = AsyncMock(
+        return_value={"updated": ["t1", "t2", "t3"], "results": [], "failed": []},
+    )
+
+    with patch("app.graph.nodes.ArcTodoClient"), patch(
+        "app.graph.nodes.TodoTools",
+        return_value=mock_tools,
+    ), patch(
+        "app.graph.nodes.execute_todo_tool",
+        new=AsyncMock(return_value={"updated": ["t1", "t2", "t3"], "results": [], "failed": []}),
+    ) as execute_mock:
+        state = await todo_tools_agent(
+            {
+                "user_token": "token",
+                "tool_name": "create_tasks",
+                "tool_arguments": {
+                    "task_ids": None,
+                    "description": "Updated descriptions",
+                },
+                "latest_user_message": (
+                    "make assistant smater and... repositories link connect... "
+                    "rag system for the assiss... create a description for this tasks"
+                ),
+                "task_refs": [
+                    {
+                        "taskId": "t1",
+                        "organizationId": "org1",
+                        "projectId": "proj1",
+                        "title": "make assistant smarter",
+                    },
+                    {
+                        "taskId": "t2",
+                        "organizationId": "org1",
+                        "projectId": "proj1",
+                        "title": "repositories link connect",
+                    },
+                    {
+                        "taskId": "t3",
+                        "organizationId": "org1",
+                        "projectId": "proj2",
+                        "title": "rag system for the assistant",
+                    },
+                ],
+                "used_tools": [],
+            }
+        )
+
+    execute_mock.assert_awaited_once()
+    assert execute_mock.await_args.args[1] == "update_tasks"
+    assert len(execute_mock.await_args.args[2]["tasks"]) == 3
+    assert state["error"] is None
 
 
 @pytest.mark.asyncio

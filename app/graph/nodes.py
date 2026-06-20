@@ -253,12 +253,10 @@ def _looks_like_multi_create(message: str) -> bool:
 
 
 def _looks_like_update_mutation(message: str) -> bool:
-    if _looks_like_move_mutation(message):
-        return True
     return bool(
         re.search(
             r"\b(update|edit|change|set|mark|complete|describe)\b"
-            r"|\badd\s+(?:a\s+)?(?:description|detail|note|comment|due\s*date)\b"
+            r"|\b(?:add|create)\s+(?:a\s+)?(?:description|detail|note|comment|due\s*date)\b"
             r"|\b(description|details|notes)\s+(?:for|to)\b",
             message,
             re.I,
@@ -435,6 +433,9 @@ def _project_hint_variants(hints: list[str]) -> list[str]:
 
 
 def _parse_create_task_titles(message: str) -> list[str]:
+    if _looks_like_update_mutation(message):
+        return []
+
     chunks = re.split(r"\banother\s+task\b", message, flags=re.I)
     titles: list[str] = []
 
@@ -467,6 +468,10 @@ def _coerce_mutation_tool(
     if not _looks_like_task_mutation(message):
         return tool_name, arguments
     if _looks_like_move_mutation(message):
+        return tool_name, arguments
+    if _looks_like_update_mutation(message):
+        return tool_name, arguments
+    if state.get("task_refs") and not _looks_like_create_mutation(message):
         return tool_name, arguments
 
     titles = _parse_create_task_titles(message)
@@ -1108,6 +1113,17 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
         }
         arguments.setdefault("task_ids", None)
 
+    if task_refs and _looks_like_update_mutation(latest_user_message) and not _looks_like_move_mutation(
+        latest_user_message
+    ):
+        tool_name = "update_tasks"
+        arguments = {
+            key: arguments[key]
+            for key in UPDATE_TASK_FIELDS
+            if key in arguments and arguments[key] is not None
+        }
+        arguments.setdefault("task_ids", None)
+
     tool_name, arguments = _coerce_mutation_tool(state, tool_name, arguments)
 
     if task_refs and tool_name in EXISTING_TASK_TOOLS:
@@ -1162,6 +1178,9 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
                 task_refs=task_refs,
                 latest_user_message=latest_user_message,
             )
+
+        if tool_name in {"create_task", "create_tasks"}:
+            arguments.pop("task_ids", None)
 
         arguments = await resolve_scope_arguments(
             tools,
