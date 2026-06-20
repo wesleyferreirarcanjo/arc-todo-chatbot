@@ -1,14 +1,18 @@
+import pytest
+
 from app.graph.nodes import context_agent, route_after_planner
 
 
-def test_context_agent_extracts_latest_user_message():
-    state = context_agent(
+@pytest.mark.asyncio
+async def test_context_agent_extracts_latest_user_message():
+    state = await context_agent(
         {
+            "user_token": "token",
             "messages": [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "hi"},
                 {"role": "user", "content": "list tasks"},
-            ]
+            ],
         }
     )
     assert state["latest_user_message"] == "list tasks"

@@ -26,6 +26,7 @@ Available tools:
 - list_organizations {}
 - list_projects {"organization_id": string}
 - list_tasks {"organization_id": string|null, "project_id": string|null, "status": string|null, "criticity": string|null}
+- get_task {"organization_id": string, "project_id": string, "task_id": string}
 - create_task {"organization_id": string, "project_id": string, "title": string, "description": string|null, "status": "todo"|"in_progress"|"done", "criticity": "low"|"medium"|"high"|"critical", "due_date": string|null}
 - update_task {"organization_id": string, "project_id": string, "task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}
 - delete_task {"organization_id": string, "project_id": string, "task_id": string}
@@ -57,15 +58,86 @@ def _extract_json(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def context_agent(state: ChatGraphState) -> ChatGraphState:
+def _format_task_context_line(task: dict[str, Any], fallback_title: str) -> str:
+    title = task.get("title") or fallback_title
+    status = task.get("status", "unknown")
+    criticity = task.get("criticity", "unknown")
+    due_date = task.get("dueDate") or task.get("due_date") or "none"
+    description = (task.get("description") or "").strip() or "none"
+    task_id = task.get("id", "unknown")
+    organization_id = task.get("organizationId") or task.get("organization_id")
+    project_id = task.get("projectId") or task.get("project_id")
+    return (
+        f"- taskId: {task_id}\n"
+        f"  title: {title}\n"
+        f"  status: {status}\n"
+        f"  criticity: {criticity}\n"
+        f"  organizationId: {organization_id}\n"
+        f"  projectId: {project_id}\n"
+        f"  dueDate: {due_date}\n"
+        f"  description: {description}"
+    )
+
+
+async def _build_task_context_text(
+    *,
+    user_token: str,
+    task_refs: list[dict[str, str]],
+) -> str:
+    if not task_refs:
+        return ""
+
+    client = ArcTodoClient(user_token=user_token)
+    tools = TodoTools(client)
+    lines: list[str] = []
+
+    for ref in task_refs:
+        task_id = ref.get("taskId") or ref.get("task_id")
+        organization_id = ref.get("organizationId") or ref.get("organization_id")
+        project_id = ref.get("projectId") or ref.get("project_id")
+        title = ref.get("title") or task_id or "Task"
+
+        if not task_id or not organization_id or not project_id:
+            lines.append(
+                f"- taskId: {task_id or 'unknown'}\n"
+                f"  title: {title}\n"
+                f"  note: missing organization or project scope"
+            )
+            continue
+
+        try:
+            task = await tools.get_task(
+                organization_id=organization_id,
+                project_id=project_id,
+                task_id=task_id,
+            )
+            lines.append(_format_task_context_line(task, title))
+        except Exception:
+            lines.append(
+                f"- taskId: {task_id}\n"
+                f"  title: {title}\n"
+                f"  organizationId: {organization_id}\n"
+                f"  projectId: {project_id}\n"
+                f"  note: task details could not be loaded"
+            )
+
+    return "Selected task context:\n" + "\n".join(lines)
+
+
+async def context_agent(state: ChatGraphState) -> ChatGraphState:
     messages = state.get("messages", [])
     latest = next(
         (message["content"] for message in reversed(messages) if message["role"] == "user"),
         "",
     )
+    task_context_text = await _build_task_context_text(
+        user_token=state["user_token"],
+        task_refs=state.get("task_refs", []),
+    )
     return {
         **state,
         "latest_user_message": latest,
+        "task_context_text": task_context_text,
         "used_tools": state.get("used_tools", []),
     }
 
@@ -81,6 +153,8 @@ async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) 
     prompt = PLANNER_PROMPT
     if context_bits:
         prompt += "\nContext: " + ", ".join(context_bits)
+    if state.get("task_context_text"):
+        prompt += "\n\n" + state["task_context_text"]
 
     result = await model.ainvoke(
         [
@@ -136,6 +210,8 @@ async def response_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings)
         tool_context = f"\nTool result:\n{json.dumps(state['tool_result'], indent=2, default=str)}"
     if state.get("error"):
         tool_context += f"\nError:\n{state['error']}"
+    if state.get("task_context_text"):
+        tool_context += f"\n\n{state['task_context_text']}"
 
     result = await model.ainvoke(
         [

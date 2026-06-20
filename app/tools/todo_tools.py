@@ -92,6 +92,18 @@ class TodoTools:
             json_body=body,
         )
 
+    async def get_task(
+        self,
+        *,
+        organization_id: str,
+        project_id: str,
+        task_id: str,
+    ) -> Any:
+        return await self._client.request(
+            "GET",
+            f"/organizations/{organization_id}/projects/{project_id}/tasks/{task_id}",
+        )
+
     async def delete_task(
         self,
         *,
@@ -128,6 +140,8 @@ async def execute_todo_tool(
             return await tools.update_task(**arguments)
         if tool_name == "delete_task":
             return await tools.delete_task(**arguments)
+        if tool_name == "get_task":
+            return await tools.get_task(**arguments)
         raise ArcTodoApiError(f"Unknown tool: {tool_name}")
     except KeyError as exc:
         raise ArcTodoApiError(f"Missing required argument for {tool_name}: {exc}") from exc

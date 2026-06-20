@@ -50,6 +50,8 @@ async def run_chat_workflow(
     user_token: str,
     organization_id: str | None,
     project_id: str | None,
+    conversation_id: str | None = None,
+    task_refs: list[dict[str, str]] | None = None,
 ) -> ChatGraphState:
     graph = build_chat_graph(runtime)
     initial_state: ChatGraphState = {
@@ -57,6 +59,8 @@ async def run_chat_workflow(
         "user_token": user_token,
         "organization_id": organization_id,
         "project_id": project_id,
+        "conversation_id": conversation_id,
+        "task_refs": task_refs or [],
         "used_tools": [],
     }
     return await graph.ainvoke(initial_state)

@@ -53,6 +53,8 @@ async def chat(
             user_token=user_token,
             organization_id=request.organization_id,
             project_id=request.project_id,
+            conversation_id=request.conversation_id,
+            task_refs=[task_ref.model_dump(by_alias=True) for task_ref in request.task_refs],
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

@@ -8,6 +8,9 @@ class ChatGraphState(TypedDict, total=False):
     user_token: str
     organization_id: str | None
     project_id: str | None
+    conversation_id: str | None
+    task_refs: list[dict[str, str]]
+    task_context_text: str
     latest_user_message: str
     route: Literal["direct", "tools"]
     tool_name: str | None
