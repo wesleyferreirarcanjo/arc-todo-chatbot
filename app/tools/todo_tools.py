@@ -116,6 +116,77 @@ class TodoTools:
             f"/organizations/{organization_id}/projects/{project_id}/tasks/{task_id}",
         )
 
+    async def delete_tasks(
+        self,
+        *,
+        tasks: list[dict[str, str]],
+    ) -> Any:
+        deleted: list[str] = []
+        failed: list[dict[str, str]] = []
+        for task in tasks:
+            task_id = task["task_id"]
+            try:
+                await self.delete_task(
+                    organization_id=task["organization_id"],
+                    project_id=task["project_id"],
+                    task_id=task_id,
+                )
+                deleted.append(task_id)
+            except Exception as exc:
+                failed.append({"task_id": task_id, "error": str(exc)})
+        return {"deleted": deleted, "failed": failed}
+
+    async def update_tasks(
+        self,
+        *,
+        tasks: list[dict[str, Any]],
+    ) -> Any:
+        updated: list[str] = []
+        failed: list[dict[str, str]] = []
+        results: list[dict[str, Any]] = []
+        update_fields = ("title", "description", "status", "criticity", "due_date")
+        for task in tasks:
+            task_id = task["task_id"]
+            try:
+                payload = {
+                    key: task[key]
+                    for key in update_fields
+                    if key in task and task[key] is not None
+                }
+                result = await self.update_task(
+                    organization_id=task["organization_id"],
+                    project_id=task["project_id"],
+                    task_id=task_id,
+                    **payload,
+                )
+                updated.append(task_id)
+                results.append({"task_id": task_id, "result": result})
+            except Exception as exc:
+                failed.append({"task_id": task_id, "error": str(exc)})
+        return {"updated": updated, "results": results, "failed": failed}
+
+    async def get_tasks(
+        self,
+        *,
+        tasks: list[dict[str, str]],
+    ) -> Any:
+        fetched: list[str] = []
+        failed: list[dict[str, str]] = []
+        results: list[Any] = []
+        for task in tasks:
+            task_id = task["task_id"]
+            try:
+                result = await self.get_task(
+                    organization_id=task["organization_id"],
+                    project_id=task["project_id"],
+                    task_id=task_id,
+                )
+                fetched.append(task_id)
+                results.append(result)
+            except Exception as exc:
+                failed.append({"task_id": task_id, "error": str(exc)})
+        return {"fetched": fetched, "tasks": results, "failed": failed}
+
 
 async def execute_todo_tool(
     tools: TodoTools,
@@ -138,10 +209,16 @@ async def execute_todo_tool(
             return await tools.create_task(**arguments)
         if tool_name == "update_task":
             return await tools.update_task(**arguments)
+        if tool_name == "update_tasks":
+            return await tools.update_tasks(tasks=arguments["tasks"])
         if tool_name == "delete_task":
             return await tools.delete_task(**arguments)
+        if tool_name == "delete_tasks":
+            return await tools.delete_tasks(tasks=arguments["tasks"])
         if tool_name == "get_task":
             return await tools.get_task(**arguments)
+        if tool_name == "get_tasks":
+            return await tools.get_tasks(tasks=arguments["tasks"])
         raise ArcTodoApiError(f"Unknown tool: {tool_name}")
     except KeyError as exc:
         raise ArcTodoApiError(f"Missing required argument for {tool_name}: {exc}") from exc

@@ -27,10 +27,14 @@ Available tools:
 - list_projects {"organization_id": string}
 - list_tasks {"organization_id": string|null, "project_id": string|null, "status": string|null, "criticity": string|null}
 - get_task {"organization_id": string, "project_id": string, "task_id": string}
+- get_tasks {"task_ids": string[]|null} — fetch multiple selected tasks; omit task_ids to use all taskIds from Selected task context
 - create_task {"organization_id": string, "project_id": string, "title": string, "description": string|null, "status": "todo"|"in_progress"|"done", "criticity": "low"|"medium"|"high"|"critical", "due_date": string|null}
 - update_task {"organization_id": string, "project_id": string, "task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}
+- update_tasks {"task_ids": string[]|null, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null} — apply the same update fields to multiple selected tasks; omit task_ids to use all taskIds from Selected task context
 - delete_task {"organization_id": string, "project_id": string, "task_id": string}
+- delete_tasks {"task_ids": string[]|null} — delete multiple selected tasks; omit task_ids to use all taskIds from Selected task context
 
+Use get_tasks, update_tasks, or delete_tasks (not the single-task variants) when the user wants to act on more than one selected task.
 Use route "direct" for greetings, general help, or when no API action is needed.
 Prefer provided organization_id and project_id context when present."""
 
@@ -124,6 +128,132 @@ async def _build_task_context_text(
     return "Selected task context:\n" + "\n".join(lines)
 
 
+def _ref_task_id(ref: dict[str, str]) -> str | None:
+    return ref.get("taskId") or ref.get("task_id")
+
+
+def _ref_organization_id(ref: dict[str, str]) -> str | None:
+    return ref.get("organizationId") or ref.get("organization_id")
+
+
+def _ref_project_id(ref: dict[str, str]) -> str | None:
+    return ref.get("projectId") or ref.get("project_id")
+
+
+def _looks_like_bulk_selected(message: str) -> bool:
+    return bool(re.search(r"\b(all|these|selected|them)\b", message, re.I))
+
+
+def _batch_task_ids(
+    *,
+    arguments: dict[str, Any],
+    task_refs: list[dict[str, str]],
+    latest_user_message: str = "",
+) -> list[str]:
+    task_ids = arguments.get("task_ids")
+    if task_ids is None and _looks_like_bulk_selected(latest_user_message) and task_refs:
+        return [tid for ref in task_refs if (tid := _ref_task_id(ref))]
+    if task_ids is None:
+        return []
+    return list(task_ids)
+
+
+def _batch_task_scopes(
+    task_ids: list[str],
+    task_refs: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    ref_by_id = {
+        tid: ref
+        for ref in task_refs
+        if (tid := _ref_task_id(ref))
+    }
+
+    tasks: list[dict[str, str]] = []
+    for task_id in task_ids:
+        ref = ref_by_id.get(task_id)
+        if not ref:
+            continue
+        organization_id = _ref_organization_id(ref)
+        project_id = _ref_project_id(ref)
+        if not organization_id or not project_id:
+            continue
+        tasks.append(
+            {
+                "organization_id": organization_id,
+                "project_id": project_id,
+                "task_id": task_id,
+            }
+        )
+    return tasks
+
+
+UPDATE_TASK_FIELDS = ("title", "description", "status", "criticity", "due_date")
+
+SINGLE_TO_BATCH_TOOL = {
+    "get_task": "get_tasks",
+    "update_task": "update_tasks",
+    "delete_task": "delete_tasks",
+}
+
+
+def resolve_delete_tasks_arguments(
+    *,
+    arguments: dict[str, Any],
+    task_refs: list[dict[str, str]],
+    latest_user_message: str = "",
+) -> dict[str, Any]:
+    task_ids = _batch_task_ids(
+        arguments=arguments,
+        task_refs=task_refs,
+        latest_user_message=latest_user_message,
+    )
+    return {"tasks": _batch_task_scopes(task_ids, task_refs)}
+
+
+def resolve_update_tasks_arguments(
+    *,
+    arguments: dict[str, Any],
+    task_refs: list[dict[str, str]],
+    latest_user_message: str = "",
+) -> dict[str, Any]:
+    task_ids = _batch_task_ids(
+        arguments=arguments,
+        task_refs=task_refs,
+        latest_user_message=latest_user_message,
+    )
+    updates = {
+        key: arguments[key]
+        for key in UPDATE_TASK_FIELDS
+        if key in arguments and arguments[key] is not None
+    }
+    tasks = [
+        {**scope, **updates}
+        for scope in _batch_task_scopes(task_ids, task_refs)
+    ]
+    return {"tasks": tasks}
+
+
+def resolve_get_tasks_arguments(
+    *,
+    arguments: dict[str, Any],
+    task_refs: list[dict[str, str]],
+    latest_user_message: str = "",
+) -> dict[str, Any]:
+    task_ids = _batch_task_ids(
+        arguments=arguments,
+        task_refs=task_refs,
+        latest_user_message=latest_user_message,
+    )
+    return {"tasks": _batch_task_scopes(task_ids, task_refs)}
+
+
+BATCH_TOOL_RESOLVERS = {
+    "get_tasks": resolve_get_tasks_arguments,
+    "update_tasks": resolve_update_tasks_arguments,
+    "delete_tasks": resolve_delete_tasks_arguments,
+}
+
+
 async def context_agent(state: ChatGraphState) -> ChatGraphState:
     messages = state.get("messages", [])
     latest = next(
@@ -211,6 +341,26 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
         arguments.setdefault(
             "project_id",
             first_ref.get("projectId") or first_ref.get("project_id"),
+        )
+
+    task_refs = state.get("task_refs", [])
+    latest_user_message = state.get("latest_user_message", "")
+    if (
+        tool_name in SINGLE_TO_BATCH_TOOL
+        and len(task_refs) > 1
+        and _looks_like_bulk_selected(latest_user_message)
+    ):
+        # ponytail: heuristic upgrade when planner picks single-task tool for bulk intent
+        batch_arguments = dict(arguments)
+        batch_arguments.setdefault("task_ids", None)
+        tool_name = SINGLE_TO_BATCH_TOOL[tool_name]
+        arguments = batch_arguments
+
+    if tool_name in BATCH_TOOL_RESOLVERS:
+        arguments = BATCH_TOOL_RESOLVERS[tool_name](
+            arguments=arguments,
+            task_refs=task_refs,
+            latest_user_message=latest_user_message,
         )
 
     client = ArcTodoClient(user_token=state["user_token"])
