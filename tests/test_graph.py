@@ -4,15 +4,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.graph.nodes import (
     BATCH_TOOL_RESOLVERS,
     context_agent,
+    _best_scope_match,
     _coerce_mutation_tool,
+    _extract_all_scope_hints,
     resolve_delete_tasks_arguments,
     resolve_get_tasks_arguments,
     resolve_scope_arguments,
     resolve_update_tasks_arguments,
+    route_after_context,
     route_after_planner,
+    route_after_scope_discovery,
+    route_after_tools,
     todo_tools_agent,
     _build_mutation_failure_response,
     _is_uuid,
+    _looks_like_create_mutation,
     _looks_like_task_mutation,
     _match_scope_name,
     _mutation_succeeded,
@@ -581,3 +587,28 @@ def test_coerce_mutation_tool_overrides_list_organizations():
     assert arguments["organization_id"] == "arc-todo"
     assert arguments["project_id"] == "my system"
     assert len(arguments["tasks"]) == 2
+
+
+def test_extract_all_scope_hints_in_arc_todo_project():
+    org_hint, project_hints = _extract_all_scope_hints(
+        "create a task in arc-todo project create the rag system\n\nin my system"
+    )
+    assert org_hint == "arc-todo"
+    assert project_hints == ["my system"]
+
+
+def test_best_scope_match_fuzzy():
+    projects = [
+        {"id": "11111111-1111-4111-8111-111111111111", "name": "My System"},
+        {"id": "22222222-2222-4222-8222-222222222222", "name": "Personal"},
+    ]
+    assert (
+        _best_scope_match(projects, "my system")
+        == "11111111-1111-4111-8111-111111111111"
+    )
+
+
+def test_create_mutation_routes_through_scope_discovery():
+    assert route_after_context({"latest_user_message": "create a task in arc-todo project"}) == "scope_discovery_agent"
+    assert route_after_scope_discovery({"latest_user_message": "create a task in arc-todo project"}) == "todo_tools_agent"
+    assert _looks_like_create_mutation("create a task in arc-todo project")

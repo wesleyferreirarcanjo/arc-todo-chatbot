@@ -7,7 +7,11 @@ from app.graph.nodes import (
     context_agent,
     planner_agent,
     response_agent,
+    route_after_context,
     route_after_planner,
+    route_after_scope_discovery,
+    route_after_tools,
+    scope_discovery_agent,
     todo_tools_agent,
 )
 from app.graph.state import ChatGraphState
@@ -23,12 +27,28 @@ def build_chat_graph(runtime: ChatbotRuntimeSettings):
         return await response_agent(state, runtime)
 
     graph.add_node("context_agent", context_agent)
+    graph.add_node("scope_discovery_agent", scope_discovery_agent)
     graph.add_node("planner_agent", planner_node)
     graph.add_node("todo_tools_agent", todo_tools_agent)
     graph.add_node("response_agent", response_node)
 
     graph.add_edge(START, "context_agent")
-    graph.add_edge("context_agent", "planner_agent")
+    graph.add_conditional_edges(
+        "context_agent",
+        route_after_context,
+        {
+            "scope_discovery_agent": "scope_discovery_agent",
+            "planner_agent": "planner_agent",
+        },
+    )
+    graph.add_conditional_edges(
+        "scope_discovery_agent",
+        route_after_scope_discovery,
+        {
+            "todo_tools_agent": "todo_tools_agent",
+            "planner_agent": "planner_agent",
+        },
+    )
     graph.add_conditional_edges(
         "planner_agent",
         route_after_planner,
@@ -37,7 +57,14 @@ def build_chat_graph(runtime: ChatbotRuntimeSettings):
             "response_agent": "response_agent",
         },
     )
-    graph.add_edge("todo_tools_agent", "response_agent")
+    graph.add_conditional_edges(
+        "todo_tools_agent",
+        route_after_tools,
+        {
+            "scope_discovery_agent": "scope_discovery_agent",
+            "response_agent": "response_agent",
+        },
+    )
     graph.add_edge("response_agent", END)
 
     return graph.compile()

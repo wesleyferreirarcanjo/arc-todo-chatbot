@@ -17,5 +17,7 @@ class ChatGraphState(TypedDict, total=False):
     tool_arguments: dict[str, Any]
     tool_result: Any
     used_tools: list[str]
+    scope_catalog: dict[str, Any]
+    scope_retried: bool
     response: str
     error: str | None
