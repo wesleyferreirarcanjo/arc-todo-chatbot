@@ -63,6 +63,35 @@ class TodoTools:
             json_body=body,
         )
 
+    async def create_tasks(
+        self,
+        *,
+        organization_id: str,
+        project_id: str,
+        tasks: list[dict[str, Any]],
+    ) -> Any:
+        created: list[Any] = []
+        failed: list[dict[str, str]] = []
+        for task in tasks:
+            title = task.get("title")
+            if not title:
+                failed.append({"title": "", "error": "Missing title"})
+                continue
+            try:
+                result = await self.create_task(
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    title=title,
+                    description=task.get("description"),
+                    status=task.get("status") or "todo",
+                    criticity=task.get("criticity") or "medium",
+                    due_date=task.get("due_date"),
+                )
+                created.append(result)
+            except Exception as exc:
+                failed.append({"title": title, "error": str(exc)})
+        return {"created": created, "failed": failed}
+
     async def update_task(
         self,
         *,
@@ -207,6 +236,8 @@ async def execute_todo_tool(
             )
         if tool_name == "create_task":
             return await tools.create_task(**arguments)
+        if tool_name == "create_tasks":
+            return await tools.create_tasks(**arguments)
         if tool_name == "update_task":
             return await tools.update_task(**arguments)
         if tool_name == "update_tasks":

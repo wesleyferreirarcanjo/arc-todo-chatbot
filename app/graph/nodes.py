@@ -7,7 +7,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from app.arc_todo_client import ArcTodoClient
+from app.arc_todo_client import ArcTodoApiError, ArcTodoClient
 from app.chatbot_settings import ChatbotRuntimeSettings
 from app.graph.state import ChatGraphState
 from app.tools.todo_tools import TodoTools, execute_todo_tool
@@ -28,15 +28,18 @@ Available tools:
 - list_tasks {"organization_id": string|null, "project_id": string|null, "status": string|null, "criticity": string|null}
 - get_task {"organization_id": string, "project_id": string, "task_id": string}
 - get_tasks {"task_ids": string[]|null} — fetch multiple selected tasks; omit task_ids to use all taskIds from Selected task context
-- create_task {"organization_id": string, "project_id": string, "title": string, "description": string|null, "status": "todo"|"in_progress"|"done", "criticity": "low"|"medium"|"high"|"critical", "due_date": string|null}
+- create_task {"organization_id": string|null, "project_id": string|null, "title": string, "description": string|null, "status": "todo"|"in_progress"|"done", "criticity": "low"|"medium"|"high"|"critical", "due_date": string|null}
+- create_tasks {"organization_id": string|null, "project_id": string|null, "tasks": [{"title": string, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}]} — create multiple tasks in one request
 - update_task {"organization_id": string, "project_id": string, "task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}
 - update_tasks {"task_ids": string[]|null, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null} — apply the same update fields to multiple selected tasks; omit task_ids to use all taskIds from Selected task context
 - delete_task {"organization_id": string, "project_id": string, "task_id": string}
 - delete_tasks {"task_ids": string[]|null} — delete multiple selected tasks; omit task_ids to use all taskIds from Selected task context
 
 Use get_tasks, update_tasks, or delete_tasks (not the single-task variants) when the user wants to act on more than one selected task.
+Use create_tasks (not create_task) when the user asks to create more than one task.
 Use route "direct" for greetings, general help, or when no API action is needed.
-Prefer provided organization_id and project_id context when present."""
+Prefer provided organization_id and project_id context when present; omit organization_id/project_id from tool_arguments when context is already provided.
+Never invent organization_id or project_id values from organization or project names in the user message — names like "arc-todo" are not UUIDs. Omit those fields and rely on context, or use list_organizations/list_projects first."""
 
 RESPONSE_PROMPT = """Write a concise assistant reply for the user based on the conversation and any tool results.
 Do not mention internal tool names unless helpful."""
@@ -195,6 +198,161 @@ SINGLE_TO_BATCH_TOOL = {
     "delete_task": "delete_tasks",
 }
 
+UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.I,
+)
+
+SCOPE_TOOLS = {
+    "create_task",
+    "create_tasks",
+    "update_task",
+    "list_projects",
+    "get_task",
+    "delete_task",
+}
+
+
+def _is_uuid(value: str | None) -> bool:
+    return bool(value and UUID_PATTERN.match(value))
+
+
+def _normalize_scope_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _pick_uuid(*values: str | None) -> str | None:
+    for value in values:
+        if _is_uuid(value):
+            return value
+    return None
+
+
+def _match_scope_name(items: list[dict[str, Any]], hint: str | None) -> str | None:
+    if not hint or _is_uuid(hint):
+        return None
+    hint_norm = _normalize_scope_name(hint)
+    if not hint_norm:
+        return None
+
+    matches: list[str] = []
+    for item in items:
+        item_id = item.get("id")
+        if not _is_uuid(item_id):
+            continue
+        for key in ("name", "slug", "title"):
+            candidate = item.get(key)
+            if isinstance(candidate, str) and _normalize_scope_name(candidate) == hint_norm:
+                matches.append(item_id)
+                break
+
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+async def _resolve_organization_id(
+    tools: TodoTools,
+    *,
+    hint: str | None,
+    state_org: str | None,
+) -> str | None:
+    resolved = _pick_uuid(state_org, hint)
+    if resolved:
+        return resolved
+
+    organizations = await tools.list_organizations()
+    if not isinstance(organizations, list):
+        return None
+
+    matched = _match_scope_name(organizations, hint)
+    if matched:
+        return matched
+
+    if len(organizations) == 1:
+        only_id = organizations[0].get("id")
+        if _is_uuid(only_id):
+            return only_id
+    return None
+
+
+async def _resolve_project_id(
+    tools: TodoTools,
+    *,
+    organization_id: str,
+    hint: str | None,
+    state_proj: str | None,
+) -> str | None:
+    resolved = _pick_uuid(state_proj, hint)
+    if resolved:
+        return resolved
+
+    projects = await tools.list_projects(organization_id)
+    if not isinstance(projects, list):
+        return None
+
+    matched = _match_scope_name(projects, hint)
+    if matched:
+        return matched
+
+    if len(projects) == 1:
+        only_id = projects[0].get("id")
+        if _is_uuid(only_id):
+            return only_id
+    return None
+
+
+async def resolve_scope_arguments(
+    tools: TodoTools,
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    state: ChatGraphState,
+) -> dict[str, Any]:
+    if tool_name not in SCOPE_TOOLS:
+        return arguments
+
+    resolved = dict(arguments)
+    org_hint = resolved.get("organization_id")
+    proj_hint = resolved.get("project_id")
+    state_org = state.get("organization_id")
+    state_proj = state.get("project_id")
+
+    organization_id = await _resolve_organization_id(
+        tools,
+        hint=org_hint,
+        state_org=state_org,
+    )
+    if organization_id:
+        resolved["organization_id"] = organization_id
+    elif org_hint and not _is_uuid(org_hint):
+        resolved.pop("organization_id", None)
+
+    project_id = None
+    if organization_id:
+        project_id = await _resolve_project_id(
+            tools,
+            organization_id=organization_id,
+            hint=proj_hint,
+            state_proj=state_proj,
+        )
+    if project_id:
+        resolved["project_id"] = project_id
+    elif proj_hint and not _is_uuid(proj_hint):
+        resolved.pop("project_id", None)
+
+    if tool_name == "create_tasks":
+        scope = {
+            key: resolved[key]
+            for key in ("organization_id", "project_id")
+            if resolved.get(key)
+        }
+        tasks = resolved.get("tasks")
+        if isinstance(tasks, list):
+            resolved["tasks"] = [{**scope, **task} for task in tasks if isinstance(task, dict)]
+
+    return resolved
+
 
 def resolve_delete_tasks_arguments(
     *,
@@ -311,9 +469,13 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
         return {**state, "error": "Planner did not select a tool"}
 
     arguments = dict(state.get("tool_arguments") or {})
-    if not arguments.get("organization_id") and state.get("organization_id"):
+    if not _is_uuid(arguments.get("organization_id")) and _is_uuid(state.get("organization_id")):
         arguments["organization_id"] = state["organization_id"]
-    if not arguments.get("project_id") and state.get("project_id"):
+    elif not arguments.get("organization_id") and state.get("organization_id"):
+        arguments["organization_id"] = state["organization_id"]
+    if not _is_uuid(arguments.get("project_id")) and _is_uuid(state.get("project_id")):
+        arguments["project_id"] = state["project_id"]
+    elif not arguments.get("project_id") and state.get("project_id"):
         arguments["project_id"] = state["project_id"]
 
     task_id = arguments.get("task_id")
@@ -365,7 +527,29 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
 
     client = ArcTodoClient(user_token=state["user_token"])
     tools = TodoTools(client)
-    result = await execute_todo_tool(tools, tool_name, arguments)
+    try:
+        arguments = await resolve_scope_arguments(
+            tools,
+            tool_name=tool_name,
+            arguments=arguments,
+            state=state,
+        )
+        result = await execute_todo_tool(tools, tool_name, arguments)
+    except ArcTodoApiError as exc:
+        return {
+            **state,
+            "tool_result": None,
+            "used_tools": list(state.get("used_tools", [])),
+            "error": str(exc),
+        }
+    except Exception as exc:
+        return {
+            **state,
+            "tool_result": None,
+            "used_tools": list(state.get("used_tools", [])),
+            "error": str(exc),
+        }
+
     used_tools = list(state.get("used_tools", []))
     used_tools.append(tool_name)
 
