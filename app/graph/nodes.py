@@ -44,6 +44,7 @@ Use get_tasks, update_tasks, move_tasks, or delete_tasks (not the single-task va
 Use move_tasks (not move_task) when the user wants to move more than one selected task.
 When Selected task context is present, keep the task in its current organization_id/project_id and only change the destination project for move requests.
 When Selected task context lists multiple tasks and the user asks to add or create descriptions, return update_tasks with a tasks array containing a distinct description for each task_id based on that task's title.
+When the user asks to fix, change, or rewrite descriptions for selected tasks, call update_tasks immediately with appropriate per-task descriptions; do not ask for confirmation first.
 Use create_tasks (not create_task) when the user asks to create more than one task.
 Use route "direct" for greetings, general help, or when no API action is needed.
 Prefer provided organization_id and project_id context when present; omit organization_id/project_id from tool_arguments when context is already provided.
@@ -256,13 +257,152 @@ def _looks_like_multi_create(message: str) -> bool:
 def _looks_like_update_mutation(message: str) -> bool:
     return bool(
         re.search(
-            r"\b(update|edit|change|set|mark|complete|describe)\b"
+            r"\b(update|edit|change|set|mark|complete|describe|fix|correct|rewrite)\b"
             r"|\b(?:add|create)\s+(?:a\s+)?(?:description|detail|note|comment|due\s*date)\b"
-            r"|\b(description|details|notes)\s+(?:for|to)\b",
+            r"|\b(description|details|notes)\s+(?:for|to|of)\b"
+            r"|\bfix\s+(?:the\s+)?description\b",
             message,
             re.I,
         )
     )
+
+
+CONFIRMATION_PATTERN = re.compile(
+    r"^(?:yes|yep|yeah|sure|ok(?:ay)?|please|go ahead|do it|apply(?: them)?|"
+    r"confirm(?:ed)?|sounds good|that works|looks good)[\s!.?]*$",
+    re.I,
+)
+
+
+def _looks_like_mutation_confirmation(message: str) -> bool:
+    return bool(CONFIRMATION_PATTERN.match(message.strip()))
+
+
+def _find_last_assistant_message(messages: list[dict[str, str]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "assistant":
+            return message.get("content") or ""
+    return ""
+
+
+def _extract_proposed_descriptions_from_assistant(text: str) -> list[tuple[str, str]]:
+    proposals: list[tuple[str, str]] = []
+    for match in re.finditer(
+        r"\d+\.\s+\*{0,2}([^*\n]+?)\*{0,2}\s*[—–-]\s*(?:\*{0,2})[\"']?(.+?)[\"']?(?:\*{0,2})?"
+        r"(?=\n\d+\.|\n\n|Would you like|\Z)",
+        text,
+        re.I | re.S,
+    ):
+        title = match.group(1).strip()
+        description = match.group(2).strip().strip("*").strip()
+        if title and description and description.lower() not in {"description updated.", "updated."}:
+            proposals.append((title, description))
+    return proposals
+
+
+def _title_matches_ref(proposal_title: str, ref_title: str) -> bool:
+    left = _normalize_scope_name(proposal_title)
+    right = _normalize_scope_name(ref_title)
+    if not left or not right:
+        return False
+    if left in right or right in left:
+        return True
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    if len(shorter) >= 10 and shorter[:10] in longer:
+        return True
+    if len(shorter) >= 6 and longer.startswith(shorter[:6]):
+        return True
+    return False
+
+
+def _build_tasks_from_proposed_descriptions(
+    proposals: list[tuple[str, str]],
+    task_refs: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for proposal_title, description in proposals:
+        for ref in task_refs:
+            task_id = _ref_task_id(ref)
+            if not task_id or task_id in used_ids:
+                continue
+            ref_title = ref.get("title") or ""
+            if not _title_matches_ref(proposal_title, ref_title):
+                continue
+            tasks.append({"task_id": task_id, "description": description})
+            used_ids.add(task_id)
+            break
+    return tasks
+
+
+def _resolve_confirmation_update_arguments(
+    messages: list[dict[str, str]],
+    task_refs: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    last_assistant = _find_last_assistant_message(messages)
+    if not last_assistant:
+        return None
+    proposals = _extract_proposed_descriptions_from_assistant(last_assistant)
+    if not proposals:
+        return None
+    tasks = _build_tasks_from_proposed_descriptions(proposals, task_refs)
+    if not tasks:
+        return None
+    return {"tasks": tasks}
+
+
+def _filter_task_refs_by_message(
+    task_refs: list[dict[str, str]],
+    message: str,
+) -> list[dict[str, str]]:
+    if len(task_refs) <= 1:
+        return task_refs
+
+    message_norm = _normalize_scope_name(message)
+    if not message_norm:
+        return task_refs
+
+    matched: list[dict[str, str]] = []
+    for ref in task_refs:
+        title = ref.get("title") or ""
+        title_norm = _normalize_scope_name(title)
+        if not title_norm:
+            continue
+        if title_norm in message_norm or message_norm in title_norm:
+            matched.append(ref)
+            continue
+        if len(title_norm) >= 8 and title_norm[:8] in message_norm:
+            matched.append(ref)
+            continue
+        if len(title_norm) >= 6 and title_norm[:6] in message_norm:
+            matched.append(ref)
+
+    return matched if matched else task_refs
+
+
+def _effective_task_refs(
+    task_refs: list[dict[str, str]],
+    latest_user_message: str,
+) -> list[dict[str, str]]:
+    if len(task_refs) <= 1 or _looks_like_bulk_selected(latest_user_message):
+        return task_refs
+    return _filter_task_refs_by_message(task_refs, latest_user_message)
+
+
+def _needs_mutation_tool_result(state: ChatGraphState) -> bool:
+    latest = state.get("latest_user_message", "")
+    if _looks_like_task_mutation(latest):
+        return True
+    if state.get("task_refs") and _looks_like_update_mutation(latest):
+        return True
+    if _looks_like_mutation_confirmation(latest) and state.get("task_refs"):
+        last_assistant = _find_last_assistant_message(state.get("messages", []))
+        if last_assistant and (
+            _extract_proposed_descriptions_from_assistant(last_assistant)
+            or re.search(r"would you like me to apply", last_assistant, re.I)
+        ):
+            return True
+    return False
 
 
 def _looks_like_create_mutation(message: str) -> bool:
@@ -508,16 +648,17 @@ def _batch_task_ids(
     latest_user_message: str = "",
 ) -> list[str]:
     task_ids = arguments.get("task_ids")
-    if task_ids is None and task_refs:
-        if len(task_refs) == 1:
-            only_id = _ref_task_id(task_refs[0])
+    refs = _effective_task_refs(task_refs, latest_user_message)
+    if task_ids is None and refs:
+        if len(refs) == 1:
+            only_id = _ref_task_id(refs[0])
             return [only_id] if only_id else []
         if (
             _looks_like_bulk_selected(latest_user_message)
             or _looks_like_update_mutation(latest_user_message)
             or _looks_like_move_mutation(latest_user_message)
         ):
-            return [tid for ref in task_refs if (tid := _ref_task_id(ref))]
+            return [tid for ref in refs if (tid := _ref_task_id(ref))]
     if task_ids is None:
         return []
     return list(task_ids)
@@ -953,13 +1094,16 @@ async def _generate_per_task_descriptions(
     *,
     message: str,
     task_refs: list[dict[str, str]],
+    task_context_text: str = "",
 ) -> dict[str, str]:
     model = build_model(runtime)
+    refs = _effective_task_refs(task_refs, message)
     task_lines = "\n".join(
         f"- task_id={task_id} title={ref.get('title') or 'Untitled'}"
-        for ref in task_refs
+        for ref in refs
         if (task_id := _ref_task_id(ref))
     )
+    context_block = f"\n\n{task_context_text}" if task_context_text else ""
     result = await model.ainvoke(
         [
             SystemMessage(
@@ -968,10 +1112,13 @@ async def _generate_per_task_descriptions(
                     "and the user request. Return JSON only in the shape "
                     '{"descriptions":{"<task_id>":"<description>"}}. '
                     "Each description must be specific to that task's title. "
+                    "Ignore incorrect or copied current descriptions. "
                     "Do not reuse the same description text."
                 )
             ),
-            HumanMessage(content=f"User request:\n{message}\n\nTasks:\n{task_lines}"),
+            HumanMessage(
+                content=f"User request:\n{message}\n\nTasks:\n{task_lines}{context_block}"
+            ),
         ]
     )
     payload = _extract_json(str(result.content))
@@ -991,6 +1138,7 @@ async def resolve_update_tasks_arguments_async(
     arguments: dict[str, Any],
     task_refs: list[dict[str, str]],
     latest_user_message: str = "",
+    task_context_text: str = "",
 ) -> dict[str, Any]:
     per_task = _build_per_task_updates_from_arguments(
         arguments=arguments,
@@ -1019,6 +1167,7 @@ async def resolve_update_tasks_arguments_async(
             runtime,
             message=latest_user_message,
             task_refs=task_refs,
+            task_context_text=task_context_text,
         )
         tasks: list[dict[str, Any]] = []
         for scope in scopes:
@@ -1138,6 +1287,21 @@ async def context_agent(state: ChatGraphState) -> ChatGraphState:
 
 
 async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) -> ChatGraphState:
+    messages = state.get("messages", [])
+    task_refs = state.get("task_refs", [])
+    latest_user_message = state.get("latest_user_message", "")
+
+    if _looks_like_mutation_confirmation(latest_user_message) and task_refs:
+        apply_arguments = _resolve_confirmation_update_arguments(messages, task_refs)
+        if apply_arguments:
+            logger.info("planner confirmation apply update_tasks tasks=%s", len(apply_arguments.get("tasks", [])))
+            return {
+                **state,
+                "route": "tools",
+                "tool_name": "update_tasks",
+                "tool_arguments": apply_arguments,
+            }
+
     model = build_model(runtime)
     context_bits = []
     if state.get("organization_id"):
@@ -1163,7 +1327,10 @@ async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) 
         route = "direct"
 
     latest_user_message = state.get("latest_user_message", "")
-    if route == "direct" and _looks_like_task_mutation(latest_user_message):
+    if route == "direct" and (
+        _looks_like_task_mutation(latest_user_message)
+        or (task_refs and _looks_like_update_mutation(latest_user_message))
+    ):
         retry = await model.ainvoke(
             [
                 SystemMessage(content=prompt + PLANNER_MUTATION_RETRY),
@@ -1322,6 +1489,7 @@ async def todo_tools_agent(
                 arguments=arguments,
                 task_refs=task_refs,
                 latest_user_message=latest_user_message,
+                task_context_text=state.get("task_context_text") or "",
             )
         elif tool_name in BATCH_TOOL_RESOLVERS:
             arguments = BATCH_TOOL_RESOLVERS[tool_name](
@@ -1412,7 +1580,7 @@ async def response_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings)
     )
     response_text = str(result.content).strip()
 
-    if _looks_like_task_mutation(state.get("latest_user_message", "")):
+    if _needs_mutation_tool_result(state):
         succeeded = _mutation_succeeded(state)
         if succeeded is False or (
             succeeded is None and state.get("route") == "direct"

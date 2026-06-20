@@ -27,7 +27,12 @@ from app.graph.nodes import (
     _is_uuid,
     _looks_like_create_mutation,
     _looks_like_task_mutation,
+    _extract_proposed_descriptions_from_assistant,
+    _filter_task_refs_by_message,
+    _looks_like_mutation_confirmation,
     _looks_like_update_mutation,
+    _resolve_confirmation_update_arguments,
+    planner_agent,
     _match_scope_name,
     _mutation_succeeded,
     _parse_create_task_titles,
@@ -741,6 +746,119 @@ async def test_resolve_update_tasks_arguments_async_generates_distinct_descripti
     assert descriptions[0].startswith("Increase conversation history")
     assert descriptions[1].startswith("Connect repository links")
     assert descriptions[2].startswith("Add a RAG system")
+
+
+def test_fix_description_matches_update_mutation():
+    message = "fix the description of: repositories link connect rag system for the assiss"
+    assert _looks_like_update_mutation(message)
+
+
+def test_filter_task_refs_by_message_keeps_mentioned_subset():
+    task_refs = [
+        {"taskId": "t1", "title": "make assistant smarter"},
+        {"taskId": "t2", "title": "repositories link connect"},
+        {"taskId": "t3", "title": "rag system for the assistant"},
+    ]
+    filtered = _filter_task_refs_by_message(
+        task_refs,
+        "fix the description of: repositories link connect rag system for the assiss",
+    )
+    assert [ref["taskId"] for ref in filtered] == ["t2", "t3"]
+
+
+def test_extract_proposed_descriptions_from_assistant():
+    text = (
+        "1. **repositories link connection to task** — "
+        '*"Set up repository linking for tasks."*\n'
+        "2. **rag system for the assisstant** — "
+        '*"Implement a RAG system for the assistant."*\n\n'
+        "Would you like me to apply these descriptions?"
+    )
+    proposals = _extract_proposed_descriptions_from_assistant(text)
+    assert len(proposals) == 2
+    assert "repository linking" in proposals[0][1]
+    assert "RAG system" in proposals[1][1]
+
+
+def test_resolve_confirmation_update_arguments():
+    messages = [
+        {"role": "user", "content": "please fix descriptions"},
+        {
+            "role": "assistant",
+            "content": (
+                "1. **repositories link connection to task** — "
+                '*"Set up repository linking for tasks."*\n'
+                "2. **rag system for the assisstant** — "
+                '*"Implement a RAG system for the assistant."*\n\n'
+                "Would you like me to apply these descriptions?"
+            ),
+        },
+        {"role": "user", "content": "yes"},
+    ]
+    task_refs = [
+        {
+            "taskId": "t2",
+            "organizationId": "org1",
+            "projectId": "proj1",
+            "title": "repositories link connect",
+        },
+        {
+            "taskId": "t3",
+            "organizationId": "org1",
+            "projectId": "proj2",
+            "title": "rag system for the assistant",
+        },
+    ]
+    result = _resolve_confirmation_update_arguments(messages, task_refs)
+    assert result is not None
+    assert len(result["tasks"]) == 2
+    assert result["tasks"][0]["task_id"] == "t2"
+    assert "repository linking" in result["tasks"][0]["description"]
+
+
+@pytest.mark.asyncio
+async def test_planner_agent_confirmation_routes_to_update_tasks():
+    runtime = MagicMock()
+    with patch("app.graph.nodes.build_model"):
+        state = await planner_agent(
+            {
+                "messages": [
+                    {"role": "user", "content": "fix descriptions"},
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "1. **repositories link connection to task** — "
+                            '*"Set up repository linking for tasks."*\n'
+                            "2. **rag system for the assisstant** — "
+                            '*"Implement a RAG system for the assistant."*\n\n'
+                            "Would you like me to apply these descriptions?"
+                        ),
+                    },
+                    {"role": "user", "content": "yes"},
+                ],
+                "latest_user_message": "yes",
+                "task_refs": [
+                    {
+                        "taskId": "t2",
+                        "organizationId": "org1",
+                        "projectId": "proj1",
+                        "title": "repositories link connect",
+                    },
+                    {
+                        "taskId": "t3",
+                        "organizationId": "org1",
+                        "projectId": "proj2",
+                        "title": "rag system for the assistant",
+                    },
+                ],
+            },
+            runtime,
+        )
+
+    assert state["route"] == "tools"
+    assert state["tool_name"] == "update_tasks"
+    assert len(state["tool_arguments"]["tasks"]) == 2
+    assert _looks_like_mutation_confirmation("yes")
 
 
 def test_create_mutation_routes_through_scope_discovery():
