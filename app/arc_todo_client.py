@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from app.config import settings
+from app.config import get_settings
 
 
 class ArcTodoApiError(Exception):
@@ -16,6 +16,7 @@ class ArcTodoApiError(Exception):
 
 class ArcTodoClient:
     def __init__(self, user_token: str | None = None) -> None:
+        settings = get_settings()
         self._base_url = settings.arc_todo_api_base_url.rstrip("/")
         self._service_token = settings.arc_todo_access_token
         self._username = settings.arc_todo_username
