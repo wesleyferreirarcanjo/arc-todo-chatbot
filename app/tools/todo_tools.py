@@ -18,6 +18,22 @@ class TodoTools:
             f"/organizations/{organization_id}/projects",
         )
 
+    async def resolve_scope(
+        self,
+        *,
+        organization_hint: str | None = None,
+        project_hint: str | None = None,
+        message: str | None = None,
+    ) -> Any:
+        params: dict[str, str] = {}
+        if organization_hint:
+            params["organizationHint"] = organization_hint
+        if project_hint:
+            params["projectHint"] = project_hint
+        if message:
+            params["message"] = message
+        return await self._client.request("GET", "/scope/resolve", params=params or None)
+
     async def list_tasks(
         self,
         *,
@@ -227,6 +243,12 @@ async def execute_todo_tool(
             return await tools.list_organizations()
         if tool_name == "list_projects":
             return await tools.list_projects(arguments["organization_id"])
+        if tool_name == "resolve_scope":
+            return await tools.resolve_scope(
+                organization_hint=arguments.get("organization_hint"),
+                project_hint=arguments.get("project_hint"),
+                message=arguments.get("message"),
+            )
         if tool_name == "list_tasks":
             return await tools.list_tasks(
                 organization_id=arguments.get("organization_id"),

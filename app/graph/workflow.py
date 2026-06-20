@@ -47,6 +47,7 @@ def build_chat_graph(runtime: ChatbotRuntimeSettings):
         {
             "todo_tools_agent": "todo_tools_agent",
             "planner_agent": "planner_agent",
+            "response_agent": "response_agent",
         },
     )
     graph.add_conditional_edges(

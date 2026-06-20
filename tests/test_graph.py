@@ -5,6 +5,8 @@ from app.graph.nodes import (
     BATCH_TOOL_RESOLVERS,
     context_agent,
     _best_scope_match,
+    _build_mutation_failure_response,
+    _catalog_from_scope_result,
     _coerce_mutation_tool,
     _extract_all_scope_hints,
     resolve_delete_tasks_arguments,
@@ -15,8 +17,8 @@ from app.graph.nodes import (
     route_after_planner,
     route_after_scope_discovery,
     route_after_tools,
+    scope_discovery_agent,
     todo_tools_agent,
-    _build_mutation_failure_response,
     _is_uuid,
     _looks_like_create_mutation,
     _looks_like_task_mutation,
@@ -474,17 +476,20 @@ async def test_resolve_scope_arguments_prefers_state_uuid_over_planner_slug():
 @pytest.mark.asyncio
 async def test_resolve_scope_arguments_resolves_organization_name():
     tools = MagicMock()
-    tools.list_organizations = AsyncMock(
-        return_value=[
-            {
+    tools.resolve_scope = AsyncMock(
+        return_value={
+            "status": "resolved",
+            "organization": {
                 "id": "4797da9c-f611-4bb8-b736-849a824c5fbc",
                 "name": "Arc Todo",
                 "slug": "arc-todo",
-            }
-        ]
-    )
-    tools.list_projects = AsyncMock(
-        return_value=[{"id": "8b2f0a44-1d63-4f7a-9c2e-111111111111", "name": "Platform"}]
+            },
+            "project": {
+                "id": "8b2f0a44-1d63-4f7a-9c2e-111111111111",
+                "name": "Platform",
+                "organizationId": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+            },
+        }
     )
 
     result = await resolve_scope_arguments(
@@ -495,11 +500,12 @@ async def test_resolve_scope_arguments_resolves_organization_name():
             "project_id": "Platform",
             "title": "RAG system",
         },
-        state={},
+        state={"latest_user_message": "create a task in arc-todo project"},
     )
 
     assert result["organization_id"] == "4797da9c-f611-4bb8-b736-849a824c5fbc"
     assert result["project_id"] == "8b2f0a44-1d63-4f7a-9c2e-111111111111"
+    tools.resolve_scope.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -610,5 +616,97 @@ def test_best_scope_match_fuzzy():
 
 def test_create_mutation_routes_through_scope_discovery():
     assert route_after_context({"latest_user_message": "create a task in arc-todo project"}) == "scope_discovery_agent"
-    assert route_after_scope_discovery({"latest_user_message": "create a task in arc-todo project"}) == "todo_tools_agent"
+    assert route_after_scope_discovery(
+        {
+            "latest_user_message": "create a task in arc-todo project",
+            "scope_status": "resolved",
+            "organization_id": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+            "project_id": "8b2f0a44-1d63-4f7a-9c2e-111111111111",
+        }
+    ) == "todo_tools_agent"
+    assert route_after_scope_discovery(
+        {
+            "latest_user_message": "create a task in arc-todo project",
+            "scope_status": "ambiguous",
+        }
+    ) == "response_agent"
     assert _looks_like_create_mutation("create a task in arc-todo project")
+
+
+@pytest.mark.asyncio
+async def test_scope_discovery_agent_uses_api_resolver():
+    mock_tools = MagicMock()
+    mock_tools.resolve_scope = AsyncMock(
+        return_value={
+            "status": "resolved",
+            "organization": {
+                "id": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+                "name": "Arc Todo",
+                "slug": "arc-todo",
+            },
+            "project": {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "name": "My System",
+                "organizationId": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+            },
+        }
+    )
+
+    with patch("app.graph.nodes.ArcTodoClient"), patch(
+        "app.graph.nodes.TodoTools",
+        return_value=mock_tools,
+    ):
+        state = await scope_discovery_agent(
+            {
+                "user_token": "token",
+                "latest_user_message": (
+                    "create a task in arc-todo project create the rag system\n\nin my system"
+                ),
+                "used_tools": [],
+            }
+        )
+
+    assert state["scope_status"] == "resolved"
+    assert state["organization_id"] == "4797da9c-f611-4bb8-b736-849a824c5fbc"
+    assert state["project_id"] == "11111111-1111-4111-8111-111111111111"
+    assert state["tool_name"] == "create_tasks"
+    mock_tools.resolve_scope.assert_awaited_once()
+
+
+def test_build_mutation_failure_response_for_ambiguous_scope():
+    message = _build_mutation_failure_response(
+        {
+            "scope_status": "ambiguous",
+            "scope_catalog": {
+                "candidates": [
+                    {
+                        "organization": {"name": "Arc Todo"},
+                        "project": {"name": "My System"},
+                    },
+                    {
+                        "organization": {"name": "Personal Org"},
+                        "project": {"name": "My System"},
+                    },
+                ]
+            },
+        }
+    )
+    assert "multiple matching projects" in message.lower()
+    assert "My System in Arc Todo" in message
+
+
+def test_catalog_from_scope_result_includes_candidates():
+    catalog = _catalog_from_scope_result(
+        {
+            "status": "ambiguous",
+            "candidates": [
+                {
+                    "organization": {"id": "org1", "name": "Arc Todo", "slug": "arc-todo"},
+                    "project": {"id": "proj1", "name": "My System", "organizationId": "org1"},
+                }
+            ],
+        }
+    )
+    assert catalog["status"] == "ambiguous"
+    assert len(catalog["candidates"]) == 1
+    assert catalog["organizations"][0]["slug"] == "arc-todo"

@@ -19,5 +19,6 @@ class ChatGraphState(TypedDict, total=False):
     used_tools: list[str]
     scope_catalog: dict[str, Any]
     scope_retried: bool
+    scope_status: Literal["resolved", "ambiguous", "not_found"]
     response: str
     error: str | None

@@ -245,6 +245,26 @@ def _build_mutation_failure_response(state: ChatGraphState) -> str:
         )
         return f"I couldn't complete that task action: {details}"
 
+    catalog = state.get("scope_catalog") or {}
+    candidates = catalog.get("candidates") or []
+    if candidates:
+        options = ", ".join(
+            f"{candidate.get('project', {}).get('name')} in {candidate.get('organization', {}).get('name')}"
+            for candidate in candidates[:8]
+            if isinstance(candidate, dict)
+        )
+        if options:
+            return (
+                "I found multiple matching projects. Which one should I use? "
+                f"Options: {options}."
+            )
+
+    if state.get("scope_status") == "not_found":
+        return (
+            "I couldn't find that organization or project. "
+            "Please tell me the project name and organization."
+        )
+
     if state.get("route") != "tools":
         return (
             "I couldn't create or change tasks because no todo action ran. "
@@ -258,7 +278,6 @@ def _build_mutation_failure_response(state: ChatGraphState) -> str:
             "Please try again."
         )
 
-    catalog = state.get("scope_catalog") or {}
     projects = catalog.get("projects") or []
     if projects:
         names = ", ".join(
@@ -547,78 +566,79 @@ def _best_scope_match(items: list[dict[str, Any]], hint: str | None) -> str | No
     return best_id if best_score >= 40 else None
 
 
-def _summarize_scope_catalog(
-    organizations: list[dict[str, Any]],
-    projects: list[dict[str, Any]],
-) -> dict[str, Any]:
-    return {
-        "organizations": [
+def _catalog_from_scope_result(result: dict[str, Any]) -> dict[str, Any]:
+    catalog: dict[str, Any] = {
+        "status": result.get("status"),
+        "organizations": [],
+        "projects": [],
+        "candidates": result.get("candidates") or [],
+    }
+    organization = result.get("organization")
+    project = result.get("project")
+    if isinstance(organization, dict):
+        catalog["organizations"] = [
             {
-                "id": org.get("id"),
-                "name": org.get("name"),
-                "slug": org.get("slug"),
+                "id": organization.get("id"),
+                "name": organization.get("name"),
+                "slug": organization.get("slug"),
             }
-            for org in organizations[:20]
-        ],
-        "projects": [
+        ]
+    if isinstance(project, dict):
+        catalog["projects"] = [
             {
                 "id": project.get("id"),
                 "name": project.get("name"),
             }
-            for project in projects[:20]
-        ],
-    }
+        ]
+    for candidate in catalog["candidates"]:
+        if not isinstance(candidate, dict):
+            continue
+        org = candidate.get("organization")
+        proj = candidate.get("project")
+        if isinstance(org, dict) and org not in catalog["organizations"]:
+            catalog["organizations"].append(org)
+        if isinstance(proj, dict) and proj not in catalog["projects"]:
+            catalog["projects"].append(proj)
+    return catalog
 
 
-async def _resolve_organization_id(
+def _apply_resolved_scope(
+    target: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    organization = result.get("organization") or {}
+    project = result.get("project") or {}
+    org_id = organization.get("id")
+    project_id = project.get("id")
+    if _is_uuid(org_id):
+        target["organization_id"] = org_id
+    if _is_uuid(project_id):
+        target["project_id"] = project_id
+
+
+async def _resolve_scope_via_api(
     tools: TodoTools,
     *,
-    hint: str | None,
+    organization_hint: str | None,
+    project_hint: str | None,
+    message: str,
     state_org: str | None,
-) -> str | None:
-    resolved = _pick_uuid(state_org, hint)
-    if resolved:
-        return resolved
-
-    organizations = await tools.list_organizations()
-    if not isinstance(organizations, list):
-        return None
-
-    matched = _best_scope_match(organizations, hint)
-    if matched:
-        return matched
-
-    if len(organizations) == 1:
-        only_id = organizations[0].get("id")
-        if _is_uuid(only_id):
-            return only_id
-    return None
-
-
-async def _resolve_project_id(
-    tools: TodoTools,
-    *,
-    organization_id: str,
-    hint: str | None,
     state_proj: str | None,
-) -> str | None:
-    resolved = _pick_uuid(state_proj, hint)
-    if resolved:
-        return resolved
+) -> dict[str, Any]:
+    organization_id = _pick_uuid(state_org)
+    project_id = _pick_uuid(state_proj)
+    if organization_id and project_id:
+        return {
+            "status": "resolved",
+            "organization": {"id": organization_id},
+            "project": {"id": project_id},
+        }
 
-    projects = await tools.list_projects(organization_id)
-    if not isinstance(projects, list):
-        return None
-
-    matched = _best_scope_match(projects, hint)
-    if matched:
-        return matched
-
-    if len(projects) == 1:
-        only_id = projects[0].get("id")
-        if _is_uuid(only_id):
-            return only_id
-    return None
+    return await tools.resolve_scope(
+        organization_hint=organization_hint,
+        project_hint=project_hint,
+        message=message,
+    )
 
 
 async def resolve_scope_arguments(
@@ -634,31 +654,26 @@ async def resolve_scope_arguments(
     resolved = dict(arguments)
     org_hint = resolved.get("organization_id")
     proj_hint = resolved.get("project_id")
-    state_org = state.get("organization_id")
-    state_proj = state.get("project_id")
+    if _is_uuid(org_hint):
+        org_hint = None
+    if _is_uuid(proj_hint):
+        proj_hint = None
 
-    organization_id = await _resolve_organization_id(
+    scope_result = await _resolve_scope_via_api(
         tools,
-        hint=org_hint,
-        state_org=state_org,
+        organization_hint=org_hint if isinstance(org_hint, str) else None,
+        project_hint=proj_hint if isinstance(proj_hint, str) else None,
+        message=state.get("latest_user_message", ""),
+        state_org=state.get("organization_id"),
+        state_proj=state.get("project_id"),
     )
-    if organization_id:
-        resolved["organization_id"] = organization_id
-    elif org_hint and not _is_uuid(org_hint):
-        resolved.pop("organization_id", None)
-
-    project_id = None
-    if organization_id:
-        project_id = await _resolve_project_id(
-            tools,
-            organization_id=organization_id,
-            hint=proj_hint,
-            state_proj=state_proj,
-        )
-    if project_id:
-        resolved["project_id"] = project_id
-    elif proj_hint and not _is_uuid(proj_hint):
-        resolved.pop("project_id", None)
+    if scope_result.get("status") == "resolved":
+        _apply_resolved_scope(resolved, scope_result)
+    else:
+        if org_hint and not _is_uuid(resolved.get("organization_id")):
+            resolved.pop("organization_id", None)
+        if proj_hint and not _is_uuid(resolved.get("project_id")):
+            resolved.pop("project_id", None)
 
     if tool_name == "create_tasks":
         scope = {
@@ -673,26 +688,62 @@ async def resolve_scope_arguments(
     return resolved
 
 
-def _match_project_from_message(
-    message: str,
-    projects: list[dict[str, Any]],
-) -> str | None:
-    message_norm = _normalize_scope_name(message)
-    best_id: str | None = None
-    best_len = 0
-    for project in projects:
-        name = project.get("name")
-        if not isinstance(name, str):
-            continue
-        name_norm = _normalize_scope_name(name)
-        if len(name_norm) >= 4 and name_norm in message_norm and len(name_norm) > best_len:
-            best_len = len(name_norm)
-            best_id = project.get("id")
-    return best_id if _is_uuid(best_id) else None
+async def scope_discovery_agent(state: ChatGraphState) -> ChatGraphState:
+    message = state.get("latest_user_message", "")
+    org_hint, project_hints = _extract_all_scope_hints(message)
+    project_hint = project_hints[0] if project_hints else None
+
+    client = ArcTodoClient(user_token=state["user_token"])
+    tools = TodoTools(client)
+    used_tools = list(state.get("used_tools", []))
+    if "resolve_scope" not in used_tools:
+        used_tools.append("resolve_scope")
+
+    scope_result = await _resolve_scope_via_api(
+        tools,
+        organization_hint=org_hint,
+        project_hint=project_hint,
+        message=message,
+        state_org=state.get("organization_id"),
+        state_proj=state.get("project_id"),
+    )
+    scope_status = scope_result.get("status", "not_found")
+    updates: ChatGraphState = {
+        **state,
+        "used_tools": used_tools,
+        "scope_catalog": _catalog_from_scope_result(scope_result),
+        "scope_status": scope_status,
+        "scope_retried": bool(state.get("scope_retried")),
+    }
+    if scope_status == "resolved":
+        _apply_resolved_scope(updates, scope_result)
+
+    logger.info(
+        "scope discovery org=%s project=%s org_hint=%s project_hints=%s status=%s",
+        updates.get("organization_id"),
+        updates.get("project_id"),
+        org_hint,
+        project_hints,
+        scope_status,
+    )
+
+    if _looks_like_create_mutation(message) and scope_status == "resolved":
+        tool_name, tool_arguments = _coerce_mutation_tool(
+            updates,
+            "create_tasks",
+            dict(updates.get("tool_arguments") or {}),
+        )
+        updates["route"] = "tools"
+        updates["tool_name"] = tool_name
+        updates["tool_arguments"] = tool_arguments
+
+    return updates
 
 
 def _needs_scope_retry(state: ChatGraphState) -> bool:
     if state.get("scope_retried"):
+        return False
+    if state.get("scope_status") in {"ambiguous", "not_found"}:
         return False
     if state.get("tool_name") not in MUTATION_TOOLS:
         return False
@@ -705,83 +756,6 @@ def _needs_scope_retry(state: ChatGraphState) -> bool:
         if not _is_uuid(state.get("organization_id")) or not _is_uuid(state.get("project_id")):
             return True
     return False
-
-
-async def scope_discovery_agent(state: ChatGraphState) -> ChatGraphState:
-    message = state.get("latest_user_message", "")
-    org_hint, project_hints = _extract_all_scope_hints(message)
-    is_retry = bool(state.get("scope_catalog"))
-
-    client = ArcTodoClient(user_token=state["user_token"])
-    tools = TodoTools(client)
-    used_tools = list(state.get("used_tools", []))
-
-    org_id = _pick_uuid(state.get("organization_id"))
-    organizations: list[dict[str, Any]] = []
-    if not org_id:
-        organizations = await tools.list_organizations()
-        if not isinstance(organizations, list):
-            organizations = []
-        if "list_organizations" not in used_tools:
-            used_tools.append("list_organizations")
-        org_id = _best_scope_match(organizations, org_hint)
-        if not org_id and len(organizations) == 1:
-            only_id = organizations[0].get("id")
-            if _is_uuid(only_id):
-                org_id = only_id
-
-    proj_id = _pick_uuid(state.get("project_id"))
-    projects: list[dict[str, Any]] = []
-    if org_id and _is_uuid(org_id):
-        projects = await tools.list_projects(org_id)
-        if not isinstance(projects, list):
-            projects = []
-        if "list_projects" not in used_tools:
-            used_tools.append("list_projects")
-        if not proj_id:
-            for hint in _project_hint_variants(project_hints):
-                proj_id = _best_scope_match(projects, hint)
-                if proj_id:
-                    break
-        if not proj_id and is_retry:
-            proj_id = _match_project_from_message(message, projects)
-        if not proj_id and len(projects) == 1:
-            only_id = projects[0].get("id")
-            if _is_uuid(only_id):
-                proj_id = only_id
-
-    catalog = _summarize_scope_catalog(organizations, projects)
-    updates: ChatGraphState = {
-        **state,
-        "used_tools": used_tools,
-        "scope_catalog": catalog,
-        "scope_retried": is_retry or bool(state.get("scope_retried")),
-    }
-    if org_id and _is_uuid(org_id):
-        updates["organization_id"] = org_id
-    if proj_id and _is_uuid(proj_id):
-        updates["project_id"] = proj_id
-
-    logger.info(
-        "scope discovery org=%s project=%s org_hint=%s project_hints=%s retry=%s",
-        updates.get("organization_id"),
-        updates.get("project_id"),
-        org_hint,
-        project_hints,
-        is_retry,
-    )
-
-    if _looks_like_create_mutation(message):
-        tool_name, tool_arguments = _coerce_mutation_tool(
-            updates,
-            "create_tasks",
-            dict(updates.get("tool_arguments") or {}),
-        )
-        updates["route"] = "tools"
-        updates["tool_name"] = tool_name
-        updates["tool_arguments"] = tool_arguments
-
-    return updates
 
 
 def resolve_delete_tasks_arguments(
@@ -1036,6 +1010,11 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
 
 
 async def response_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) -> ChatGraphState:
+    if state.get("scope_status") in {"ambiguous", "not_found"} and _looks_like_create_mutation(
+        state.get("latest_user_message", "")
+    ):
+        return {**state, "response": _build_mutation_failure_response(state)}
+
     model = build_model(runtime)
     conversation = "\n".join(
         f"{message['role']}: {message['content']}" for message in state.get("messages", [])
@@ -1073,9 +1052,13 @@ def route_after_context(state: ChatGraphState) -> str:
 
 
 def route_after_scope_discovery(state: ChatGraphState) -> str:
-    if _looks_like_create_mutation(state.get("latest_user_message", "")):
+    if not _looks_like_create_mutation(state.get("latest_user_message", "")):
+        return "planner_agent"
+    if state.get("scope_status") in {"ambiguous", "not_found"}:
+        return "response_agent"
+    if _is_uuid(state.get("organization_id")) and _is_uuid(state.get("project_id")):
         return "todo_tools_agent"
-    return "planner_agent"
+    return "response_agent"
 
 
 def route_after_tools(state: ChatGraphState) -> str:
