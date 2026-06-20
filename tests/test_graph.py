@@ -10,8 +10,11 @@ from app.graph.nodes import (
     resolve_update_tasks_arguments,
     route_after_planner,
     todo_tools_agent,
+    _build_mutation_failure_response,
     _is_uuid,
+    _looks_like_task_mutation,
     _match_scope_name,
+    _mutation_succeeded,
 )
 from app.tools.todo_tools import TodoTools, execute_todo_tool
 
@@ -517,3 +520,31 @@ async def test_todo_tools_agent_returns_error_instead_of_raising():
 
     assert state["tool_result"] is None
     assert "Request failed (500)" in state["error"]
+
+
+def test_looks_like_task_mutation():
+    assert _looks_like_task_mutation("create a task to arc-todo")
+    assert not _looks_like_task_mutation("hello there")
+
+
+def test_mutation_succeeded_requires_create_tasks_result():
+    assert _mutation_succeeded(
+        {
+            "route": "tools",
+            "tool_name": "create_tasks",
+            "tool_result": {"created": [{"id": "t1"}], "failed": []},
+        }
+    )
+    assert not _mutation_succeeded(
+        {
+            "route": "tools",
+            "tool_name": "create_tasks",
+            "tool_result": {"created": [], "failed": [{"title": "x", "error": "nope"}]},
+        }
+    )
+    assert not _mutation_succeeded({"route": "direct", "tool_name": "create_tasks"})
+
+
+def test_build_mutation_failure_response_when_no_tool_ran():
+    message = _build_mutation_failure_response({"route": "direct"})
+    assert "no todo action ran" in message.lower()

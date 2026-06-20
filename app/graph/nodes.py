@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -42,7 +45,25 @@ Prefer provided organization_id and project_id context when present; omit organi
 Never invent organization_id or project_id values from organization or project names in the user message — names like "arc-todo" are not UUIDs. Omit those fields and rely on context, or use list_organizations/list_projects first."""
 
 RESPONSE_PROMPT = """Write a concise assistant reply for the user based on the conversation and any tool results.
-Do not mention internal tool names unless helpful."""
+Do not mention internal tool names unless helpful.
+Never claim that tasks were created, updated, or deleted unless Tool result confirms it with task ids or a non-empty created/updated/deleted list.
+If Error is present, explain that the action failed and include the error.
+If no Tool result is present for a mutation request, say you could not perform the action yet."""
+
+MUTATION_TOOLS = {
+    "create_task",
+    "create_tasks",
+    "update_task",
+    "update_tasks",
+    "delete_task",
+    "delete_tasks",
+}
+
+PLANNER_MUTATION_RETRY = (
+    "\nIMPORTANT: The user is asking to create, update, or delete tasks. "
+    'Return route "tools" with the appropriate tool and arguments. '
+    "Do not answer directly."
+)
 
 
 def build_model(runtime: ChatbotRuntimeSettings) -> ChatOpenAI:
@@ -145,6 +166,103 @@ def _ref_project_id(ref: dict[str, str]) -> str | None:
 
 def _looks_like_bulk_selected(message: str) -> bool:
     return bool(re.search(r"\b(all|these|selected|them)\b", message, re.I))
+
+
+def _looks_like_task_mutation(message: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(create|add|make|new|update|delete|remove|mark|complete)\b.*\btasks?\b"
+            r"|\btasks?\b.*\b(create|add|make|new|update|delete|remove|mark|complete)\b",
+            message,
+            re.I,
+        )
+    )
+
+
+def _looks_like_multi_create(message: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(two|both|multiple|another|second|2)\b.*\btasks?\b"
+            r"|\btasks?\b.*\b(two|both|multiple|another|second|2)\b"
+            r"|\banother task\b",
+            message,
+            re.I,
+        )
+    )
+
+
+def _mutation_succeeded(state: ChatGraphState) -> bool | None:
+    if state.get("route") != "tools":
+        return None
+
+    tool_name = state.get("tool_name")
+    if tool_name not in MUTATION_TOOLS:
+        return None
+    if state.get("error"):
+        return False
+
+    result = state.get("tool_result")
+    if result is None:
+        return False
+    if not isinstance(result, dict):
+        return True
+
+    if tool_name == "create_task":
+        return bool(result.get("id"))
+    if tool_name == "create_tasks":
+        return len(result.get("created", [])) > 0 and not result.get("failed")
+    if tool_name == "update_task":
+        return bool(result.get("id"))
+    if tool_name == "update_tasks":
+        return len(result.get("updated", [])) > 0 and not result.get("failed")
+    if tool_name == "delete_task":
+        return True
+    if tool_name == "delete_tasks":
+        return len(result.get("deleted", [])) > 0 and not result.get("failed")
+    return True
+
+
+def _build_mutation_failure_response(state: ChatGraphState) -> str:
+    error = state.get("error")
+    if error:
+        return f"I couldn't complete that task action: {error}"
+
+    tool_name = state.get("tool_name")
+    result = state.get("tool_result")
+    if isinstance(result, dict) and result.get("failed"):
+        failed = result["failed"]
+        details = "; ".join(
+            str(item.get("error") or item.get("title") or item)
+            for item in failed[:3]
+        )
+        return f"I couldn't complete that task action: {details}"
+
+    if state.get("route") != "tools":
+        return (
+            "I couldn't create or change tasks because no todo action ran. "
+            "Please try again, or select the organization and project first."
+        )
+
+    return "I couldn't complete that task action. Please try again."
+
+
+def _validate_mutation_arguments(tool_name: str, arguments: dict[str, Any]) -> str | None:
+    if tool_name == "create_task":
+        if not arguments.get("title"):
+            return "Missing task title"
+        if not _is_uuid(arguments.get("organization_id")) or not _is_uuid(
+            arguments.get("project_id")
+        ):
+            return "Missing organization or project scope for task creation"
+    if tool_name == "create_tasks":
+        if not _is_uuid(arguments.get("organization_id")) or not _is_uuid(
+            arguments.get("project_id")
+        ):
+            return "Missing organization or project scope for task creation"
+        tasks = arguments.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            return "No tasks to create"
+    return None
 
 
 def _batch_task_ids(
@@ -455,6 +573,28 @@ async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) 
     if route not in {"direct", "tools"}:
         route = "direct"
 
+    latest_user_message = state.get("latest_user_message", "")
+    if route == "direct" and _looks_like_task_mutation(latest_user_message):
+        retry = await model.ainvoke(
+            [
+                SystemMessage(content=prompt + PLANNER_MUTATION_RETRY),
+                HumanMessage(content=latest_user_message),
+            ]
+        )
+        retry_payload = _extract_json(str(retry.content))
+        retry_route = retry_payload.get("route", route)
+        if retry_route == "tools" and retry_payload.get("tool_name"):
+            payload = retry_payload
+            route = "tools"
+
+    logger.info(
+        "planner route=%s tool=%s org=%s project=%s",
+        route,
+        payload.get("tool_name"),
+        state.get("organization_id"),
+        state.get("project_id"),
+    )
+
     return {
         **state,
         "route": route,
@@ -534,7 +674,26 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
             arguments=arguments,
             state=state,
         )
+        validation_error = _validate_mutation_arguments(tool_name, arguments)
+        if validation_error:
+            logger.warning(
+                "mutation validation failed tool=%s error=%s args=%s",
+                tool_name,
+                validation_error,
+                {key: arguments.get(key) for key in ("organization_id", "project_id", "title", "tasks")},
+            )
+            return {
+                **state,
+                "tool_result": None,
+                "used_tools": list(state.get("used_tools", [])),
+                "error": validation_error,
+            }
         result = await execute_todo_tool(tools, tool_name, arguments)
+        logger.info(
+            "tool executed tool=%s success=%s",
+            tool_name,
+            _mutation_succeeded({**state, "tool_result": result, "error": None}),
+        )
     except ArcTodoApiError as exc:
         return {
             **state,
@@ -580,7 +739,14 @@ async def response_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings)
             HumanMessage(content=f"Conversation:\n{conversation}{tool_context}"),
         ]
     )
-    return {**state, "response": str(result.content).strip()}
+    response_text = str(result.content).strip()
+
+    if _looks_like_task_mutation(state.get("latest_user_message", "")):
+        succeeded = _mutation_succeeded(state)
+        if succeeded is not True:
+            response_text = _build_mutation_failure_response(state)
+
+    return {**state, "response": response_text}
 
 
 def route_after_planner(state: ChatGraphState) -> str:
