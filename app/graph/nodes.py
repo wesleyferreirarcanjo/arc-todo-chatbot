@@ -243,6 +243,13 @@ def _build_mutation_failure_response(state: ChatGraphState) -> str:
             "Please try again, or select the organization and project first."
         )
 
+    tool_name = state.get("tool_name")
+    if tool_name and tool_name not in MUTATION_TOOLS:
+        return (
+            "I couldn't create the tasks because the assistant picked the wrong action. "
+            "Please try again."
+        )
+
     return "I couldn't complete that task action. Please try again."
 
 
@@ -263,6 +270,79 @@ def _validate_mutation_arguments(tool_name: str, arguments: dict[str, Any]) -> s
         if not isinstance(tasks, list) or not tasks:
             return "No tasks to create"
     return None
+
+
+def _extract_scope_hints(message: str) -> tuple[str | None, str | None]:
+    org_hint = None
+    project_hint = None
+
+    org_match = re.search(r"\bto\s+([a-z0-9][a-z0-9-]*)\b", message, re.I)
+    if org_match and not _is_uuid(org_match.group(1)):
+        org_hint = org_match.group(1)
+
+    project_match = re.search(r"\bin\s+my\s+(.+?)\s*\.?\s*$", message, re.I | re.M)
+    if project_match:
+        project_hint = f"my {project_match.group(1).strip()}"
+
+    return org_hint, project_hint
+
+
+def _parse_create_task_titles(message: str) -> list[str]:
+    chunks = re.split(r"\banother\s+task\b", message, flags=re.I)
+    titles: list[str] = []
+
+    for chunk in chunks:
+        text = chunk.strip()
+        if not text:
+            continue
+        text = re.sub(
+            r"^create\s+(?:a\s+)?tasks?\s+(?:to\s+[a-z0-9-]+\s+)?",
+            "",
+            text,
+            flags=re.I,
+        )
+        text = re.sub(r"^create\s+(?:a\s+)?tasks?\s*", "", text, flags=re.I)
+        text = re.sub(r"^create\s+(?:the\s+)?", "", text, flags=re.I)
+        text = re.sub(r"\bin\s+my\s+.+$", "", text, flags=re.I | re.M).strip()
+        text = text.strip(" .")
+        if len(text) >= 3:
+            titles.append(text)
+
+    return titles
+
+
+def _coerce_mutation_tool(
+    state: ChatGraphState,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    message = state.get("latest_user_message", "")
+    if not _looks_like_task_mutation(message):
+        return tool_name, arguments
+
+    titles = _parse_create_task_titles(message)
+    org_hint, project_hint = _extract_scope_hints(message)
+    coerced = dict(arguments)
+
+    if org_hint and not _is_uuid(coerced.get("organization_id")):
+        coerced["organization_id"] = org_hint
+    if project_hint and not _is_uuid(coerced.get("project_id")):
+        coerced["project_id"] = project_hint
+
+    if tool_name in {"create_task", "create_tasks"}:
+        if titles:
+            if len(titles) > 1 or tool_name == "create_tasks":
+                coerced["tasks"] = [{"title": title} for title in titles]
+                return "create_tasks", coerced
+            coerced["title"] = titles[0]
+            return "create_task", coerced
+        return tool_name, coerced
+
+    if not titles:
+        return tool_name, coerced
+
+    coerced["tasks"] = [{"title": title} for title in titles]
+    return "create_tasks", coerced
 
 
 def _batch_task_ids(
@@ -645,6 +725,8 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
             first_ref.get("projectId") or first_ref.get("project_id"),
         )
 
+    tool_name, arguments = _coerce_mutation_tool(state, tool_name, arguments)
+
     task_refs = state.get("task_refs", [])
     latest_user_message = state.get("latest_user_message", "")
     if (
@@ -714,6 +796,7 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
 
     return {
         **state,
+        "tool_name": tool_name,
         "tool_result": result,
         "used_tools": used_tools,
         "error": None,
@@ -743,7 +826,9 @@ async def response_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings)
 
     if _looks_like_task_mutation(state.get("latest_user_message", "")):
         succeeded = _mutation_succeeded(state)
-        if succeeded is not True:
+        if succeeded is False or (
+            succeeded is None and state.get("route") == "direct"
+        ):
             response_text = _build_mutation_failure_response(state)
 
     return {**state, "response": response_text}

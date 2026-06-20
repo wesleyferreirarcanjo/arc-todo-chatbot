@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.graph.nodes import (
     BATCH_TOOL_RESOLVERS,
     context_agent,
+    _coerce_mutation_tool,
     resolve_delete_tasks_arguments,
     resolve_get_tasks_arguments,
     resolve_scope_arguments,
@@ -15,6 +16,7 @@ from app.graph.nodes import (
     _looks_like_task_mutation,
     _match_scope_name,
     _mutation_succeeded,
+    _parse_create_task_titles,
 )
 from app.tools.todo_tools import TodoTools, execute_todo_tool
 
@@ -548,3 +550,34 @@ def test_mutation_succeeded_requires_create_tasks_result():
 def test_build_mutation_failure_response_when_no_tool_ran():
     message = _build_mutation_failure_response({"route": "direct"})
     assert "no todo action ran" in message.lower()
+
+
+def test_parse_create_task_titles_from_user_message():
+    message = (
+        "create a task to arc-todo create the rag system for the assisstant\n\n"
+        "another task create the repositories link connection to task.\n\n"
+        "in my system"
+    )
+    titles = _parse_create_task_titles(message)
+    assert titles == [
+        "rag system for the assisstant",
+        "repositories link connection to task",
+    ]
+
+
+def test_coerce_mutation_tool_overrides_list_organizations():
+    tool_name, arguments = _coerce_mutation_tool(
+        {
+            "latest_user_message": (
+                "create a task to arc-todo create the rag system for the assisstant\n\n"
+                "another task create the repositories link connection to task.\n\n"
+                "in my system"
+            ),
+        },
+        "list_organizations",
+        {},
+    )
+    assert tool_name == "create_tasks"
+    assert arguments["organization_id"] == "arc-todo"
+    assert arguments["project_id"] == "my system"
+    assert len(arguments["tasks"]) == 2

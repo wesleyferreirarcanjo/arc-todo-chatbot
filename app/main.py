@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -7,6 +9,8 @@ from app.chatbot_settings import ChatbotSettingsError, chatbot_settings_client
 from app.config import settings
 from app.graph.workflow import run_chat_workflow
 from app.models import ChatRequest, ChatResponse
+
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Arc Todo Chatbot")
 
