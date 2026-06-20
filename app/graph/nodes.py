@@ -252,12 +252,32 @@ def _looks_like_multi_create(message: str) -> bool:
     )
 
 
+def _looks_like_update_mutation(message: str) -> bool:
+    if _looks_like_move_mutation(message):
+        return True
+    return bool(
+        re.search(
+            r"\b(update|edit|change|set|mark|complete|describe)\b"
+            r"|\badd\s+(?:a\s+)?(?:description|detail|note|comment|due\s*date)\b"
+            r"|\b(description|details|notes)\s+(?:for|to)\b",
+            message,
+            re.I,
+        )
+    )
+
+
 def _looks_like_create_mutation(message: str) -> bool:
-    if not _looks_like_task_mutation(message):
+    if _looks_like_update_mutation(message):
         return False
-    if re.search(r"\b(update|delete|remove|mark|complete)\b", message, re.I):
-        return False
-    return bool(re.search(r"\b(create|add|make|new)\b", message, re.I))
+    if re.search(r"\b(create|make|new)\s+(?:a\s+)?tasks?\b", message, re.I):
+        return True
+    if re.search(r"\badd\s+(?:a\s+)?tasks?\b", message, re.I):
+        return True
+    if re.search(r"\banother\s+task\b", message, re.I):
+        return True
+    if _looks_like_multi_create(message):
+        return True
+    return False
 
 
 def _mutation_succeeded(state: ChatGraphState) -> bool | None:
@@ -486,7 +506,11 @@ def _batch_task_ids(
         if len(task_refs) == 1:
             only_id = _ref_task_id(task_refs[0])
             return [only_id] if only_id else []
-        if _looks_like_bulk_selected(latest_user_message):
+        if (
+            _looks_like_bulk_selected(latest_user_message)
+            or _looks_like_update_mutation(latest_user_message)
+            or _looks_like_move_mutation(latest_user_message)
+        ):
             return [tid for ref in task_refs if (tid := _ref_task_id(ref))]
     if task_ids is None:
         return []
@@ -1095,6 +1119,7 @@ async def todo_tools_agent(state: ChatGraphState) -> ChatGraphState:
         and (
             _looks_like_bulk_selected(latest_user_message)
             or _looks_like_move_mutation(latest_user_message)
+            or (not arguments.get("task_id") and not arguments.get("task_ids"))
         )
     ):
         # ponytail: heuristic upgrade when planner picks single-task tool for bulk intent

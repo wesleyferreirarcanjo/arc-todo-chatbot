@@ -26,6 +26,7 @@ from app.graph.nodes import (
     _is_uuid,
     _looks_like_create_mutation,
     _looks_like_task_mutation,
+    _looks_like_update_mutation,
     _match_scope_name,
     _mutation_succeeded,
     _parse_create_task_titles,
@@ -618,8 +619,45 @@ def test_best_scope_match_fuzzy():
     )
 
 
+def test_resolve_update_tasks_arguments_uses_all_refs_for_description_update():
+    task_refs = [
+        {
+            "taskId": "t1",
+            "organizationId": "org1",
+            "projectId": "proj1",
+            "title": "make assistant smarter",
+        },
+        {
+            "taskId": "t2",
+            "organizationId": "org1",
+            "projectId": "proj1",
+            "title": "repositories link connect",
+        },
+        {
+            "taskId": "t3",
+            "organizationId": "org1",
+            "projectId": "proj2",
+            "title": "rag system for the assistant",
+        },
+    ]
+
+    result = resolve_update_tasks_arguments(
+        arguments={"task_ids": None, "description": "Updated scope"},
+        task_refs=task_refs,
+        latest_user_message="add description for this task",
+    )
+
+    assert len(result["tasks"]) == 3
+    assert all(task["description"] == "Updated scope" for task in result["tasks"])
+
+
 def test_create_mutation_routes_through_scope_discovery():
     assert route_after_context({"latest_user_message": "create a task in arc-todo project"}) == "scope_discovery_agent"
+    assert route_after_context(
+        {"latest_user_message": "add description for this task"}
+    ) == "planner_agent"
+    assert not _looks_like_create_mutation("add description for this task")
+    assert _looks_like_update_mutation("add description for this task")
     assert route_after_scope_discovery(
         {
             "latest_user_message": "create a task in arc-todo project",
