@@ -17,11 +17,11 @@ Python FastAPI chatbot service deployed in Coolify project **`arc-todo`** on ser
 | Field | Value |
 | --- | --- |
 | Coolify resource name | `arc-todo-chatbot` |
-| Application UUID | *(create in Coolify — add UUID here after provisioning)* |
+| Application UUID | `nyagev0aqp4qow1zri6wise5` |
 | Repository | [wesleyferreirarcanjo/arc-todo-chatbot](https://github.com/wesleyferreirarcanjo/arc-todo-chatbot) |
-| Branch | `main` |
+| Branch | `master` |
 | Build pack | Dockerfile |
-| Public URL | *(assign in Coolify — add URL here after provisioning)* |
+| Public URL | `http://nyagev0aqp4qow1zri6wise5.72.60.59.203.sslip.io` |
 | Health check | `GET /health` → `{ "status": "ok" }` |
 
 ### Build / run
