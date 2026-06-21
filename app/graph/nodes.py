@@ -34,13 +34,13 @@ Example: create a task and mark another selected task done -> two actions: creat
 Available tools:
 - list_organizations {}
 - list_projects {"organization_id": string}
-- list_tasks {"organization_id": string|null, "project_id": string|null, "status": string|null, "criticity": string|null}
+- list_tasks {"organization_id": string|null, "project_id": string|null, "status": string|null, "criticity": string|null, "parent_task_id": string|null}
 - get_task {"organization_id": string, "project_id": string, "task_id": string}
 - get_tasks {"task_ids": string[]|null} — fetch multiple selected tasks; omit task_ids to use all taskIds from Selected task context
-- create_task {"organization_id": string|null, "project_id": string|null, "title": string, "description": string|null, "status": "todo"|"in_progress"|"done", "criticity": "low"|"medium"|"high"|"critical", "due_date": string|null}
-- create_tasks {"organization_id": string|null, "project_id": string|null, "tasks": [{"title": string, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}]} — create multiple tasks in one request
-- update_task {"organization_id": string, "project_id": string, "task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}
-- update_tasks {"task_ids": string[]|null, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "tasks": [{"task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null}]|null} — for multiple selected tasks, prefer a tasks array with one entry per task_id when values differ (especially descriptions); shared fields may apply to all only when every task should get the same value
+- create_task {"organization_id": string|null, "project_id": string|null, "title": string, "description": string|null, "status": "todo"|"in_progress"|"done", "criticity": "low"|"medium"|"high"|"critical", "due_date": string|null, "parent_task_id": string|null}
+- create_tasks {"organization_id": string|null, "project_id": string|null, "tasks": [{"title": string, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null}]} — create multiple tasks in one request
+- update_task {"organization_id": string, "project_id": string, "task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null}
+- update_tasks {"task_ids": string[]|null, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "tasks": [{"task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null}]|null} — for multiple selected tasks, prefer a tasks array with one entry per task_id when values differ (especially descriptions); shared fields may apply to all only when every task should get the same value
 - move_task {"task_id": string, "target_project_id": string|null, "target_project_hint": string|null} — move one selected task to another project; use organization_id/project_id from Selected task context for the task's current location
 - move_tasks {"task_ids": string[]|null, "target_project_id": string|null, "target_project_hint": string|null} — move multiple selected tasks to another project
 - delete_task {"organization_id": string, "project_id": string, "task_id": string}
@@ -53,6 +53,9 @@ When Selected task context lists multiple tasks and the user asks to add or crea
 When the user asks to fix, change, or rewrite descriptions for selected tasks, call update_tasks immediately with appropriate per-task descriptions; do not ask for confirmation first.
 When the user asks for a description (including creative or matching descriptions) and none is provided, infer a reasonable description from the task title and request — do not ask the user to supply it.
 Use create_tasks (not create_task) when the user asks to create more than one task in the same project.
+Tasks support one parent level: a parent task may have direct subtasks via parent_task_id. Subtasks cannot have subtasks.
+When the user asks to add a subtask under a selected parent task, use create_task with parent_task_id from Selected task context.
+When the user marks a parent task done, the API completes all subtasks. When all subtasks are done, the API completes the parent.
 Use route "direct" for greetings, general help, or when no API action is needed.
 Ask the user a clarifying question only when organization/project scope, destructive intent, or target task identity is genuinely ambiguous.
 Prefer provided organization_id and project_id context when present; omit organization_id/project_id from tool_arguments when context is already provided.
@@ -76,7 +79,7 @@ MUTATION_TOOLS = {
     "delete_tasks",
 }
 
-UPDATE_TASK_FIELDS = ("title", "description", "status", "criticity", "due_date")
+UPDATE_TASK_FIELDS = ("title", "description", "status", "criticity", "due_date", "parent_task_id")
 
 PLANNER_MUTATION_RETRY = (
     "\nIMPORTANT: The user is asking to create, update, or delete tasks. "
@@ -109,6 +112,8 @@ def _normalize_tool_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(arguments)
     if "priority" in normalized and "criticity" not in normalized:
         normalized["criticity"] = normalized.pop("priority")
+    if "parent_id" in normalized and "parent_task_id" not in normalized:
+        normalized["parent_task_id"] = normalized.pop("parent_id")
     raw_tasks = normalized.get("tasks")
     if isinstance(raw_tasks, list):
         normalized["tasks"] = [
@@ -178,16 +183,35 @@ def _format_task_context_line(task: dict[str, Any], fallback_title: str) -> str:
     task_id = task.get("id", "unknown")
     organization_id = task.get("organizationId") or task.get("organization_id")
     project_id = task.get("projectId") or task.get("project_id")
-    return (
-        f"- taskId: {task_id}\n"
-        f"  title: {title}\n"
-        f"  status: {status}\n"
-        f"  criticity: {criticity}\n"
-        f"  organizationId: {organization_id}\n"
-        f"  projectId: {project_id}\n"
-        f"  dueDate: {due_date}\n"
-        f"  description: {description}"
-    )
+    parent_task_id = task.get("parentTaskId") or task.get("parent_task_id")
+    subtasks = task.get("subtasks") or []
+    subtask_progress = task.get("subtaskProgress") or task.get("subtask_progress")
+    lines = [
+        f"- taskId: {task_id}",
+        f"  title: {title}",
+        f"  status: {status}",
+        f"  criticity: {criticity}",
+        f"  organizationId: {organization_id}",
+        f"  projectId: {project_id}",
+        f"  dueDate: {due_date}",
+        f"  description: {description}",
+    ]
+    if parent_task_id:
+        lines.append(f"  parentTaskId: {parent_task_id}")
+    if isinstance(subtask_progress, dict) and subtask_progress.get("total"):
+        lines.append(
+            "  subtaskProgress: "
+            f"{subtask_progress.get('done', 0)}/{subtask_progress.get('total', 0)} done"
+        )
+    if isinstance(subtasks, list) and subtasks:
+        lines.append("  subtasks:")
+        for subtask in subtasks[:8]:
+            if not isinstance(subtask, dict):
+                continue
+            sub_title = subtask.get("title") or subtask.get("id") or "subtask"
+            sub_status = subtask.get("status") or "unknown"
+            lines.append(f"    - {sub_title} ({sub_status})")
+    return "\n".join(lines)
 
 
 async def _build_task_context_text(
@@ -480,9 +504,44 @@ def _needs_mutation_tool_result(state: ChatGraphState) -> bool:
     return False
 
 
+def _looks_like_subtask_mutation(message: str) -> bool:
+    return bool(re.search(r"\b(?:subtask|sub-task|sub task)\b", message, re.I))
+
+
+def _apply_subtask_parent_from_refs(
+    arguments: dict[str, Any],
+    task_refs: list[dict[str, str]],
+    message: str,
+) -> dict[str, Any]:
+    if not _looks_like_subtask_mutation(message):
+        return arguments
+    if arguments.get("parent_task_id") or arguments.get("parent_id"):
+        return arguments
+
+    refs = _effective_task_refs(task_refs, message)
+    if len(refs) != 1:
+        return arguments
+
+    parent_id = _ref_task_id(refs[0])
+    if not parent_id:
+        return arguments
+
+    updated = dict(arguments)
+    updated["parent_task_id"] = parent_id
+    if not updated.get("organization_id"):
+        updated["organization_id"] = refs[0].get("organizationId") or refs[0].get(
+            "organization_id"
+        )
+    if not updated.get("project_id"):
+        updated["project_id"] = refs[0].get("projectId") or refs[0].get("project_id")
+    return updated
+
+
 def _looks_like_create_mutation(message: str) -> bool:
     if _looks_like_update_mutation(message):
         return False
+    if _looks_like_subtask_mutation(message):
+        return True
     if re.search(r"\b(create|make|new)\s+(?:a\s+)?tasks?\b", message, re.I):
         return True
     if re.search(r"\badd\s+(?:a\s+)?tasks?\b", message, re.I):
@@ -1532,6 +1591,9 @@ def _format_action_success_line(action: dict[str, Any]) -> str:
     if tool_name == "create_task":
         title = result.get("title") or "task"
         task_id = result.get("id") or "unknown"
+        parent_task_id = result.get("parentTaskId") or result.get("parent_task_id")
+        if parent_task_id:
+            return f"- Created subtask **{title}** under parent {parent_task_id} (id: {task_id})"
         return f"- Created **{title}** (id: {task_id})"
     if tool_name == "create_tasks":
         created = result.get("created") or []
@@ -1857,6 +1919,11 @@ async def _execute_single_tool(
 
         if tool_name in {"create_task", "create_tasks"}:
             arguments.pop("task_ids", None)
+            arguments = _apply_subtask_parent_from_refs(
+                arguments,
+                task_refs,
+                latest_user_message,
+            )
             arguments = await _maybe_generate_create_descriptions(
                 runtime,
                 tool_name=tool_name,

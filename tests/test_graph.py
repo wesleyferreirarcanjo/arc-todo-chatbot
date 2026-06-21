@@ -1,9 +1,11 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from app.tools.todo_tools import TodoTools, execute_todo_tool
 from app.graph.nodes import (
     BATCH_TOOL_RESOLVERS,
     context_agent,
+    _apply_subtask_parent_from_refs,
     _apply_task_ref_source_scope,
     _best_scope_match,
     _build_mutation_failure_response,
@@ -11,7 +13,9 @@ from app.graph.nodes import (
     _coerce_mutation_tool,
     _extract_all_scope_hints,
     _extract_move_target_hint,
+    _format_task_context_line,
     _looks_like_move_mutation,
+    _looks_like_subtask_mutation,
     resolve_delete_tasks_arguments,
     resolve_get_tasks_arguments,
     resolve_move_tasks_arguments,
@@ -43,7 +47,6 @@ from app.graph.nodes import (
     _action_succeeded,
     response_agent,
 )
-from app.tools.todo_tools import TodoTools, execute_todo_tool
 
 
 @pytest.mark.asyncio
@@ -1437,3 +1440,75 @@ async def test_resolve_update_tasks_arguments_async_generates_single_task_descri
             "description": "Verify copy and planning flows in the task system.",
         }
     ]
+
+
+def test_format_task_context_line_includes_parent_and_subtasks():
+    line = _format_task_context_line(
+        {
+            "id": "parent-1",
+            "title": "Parent task",
+            "status": "in_progress",
+            "criticity": "medium",
+            "organizationId": "org-1",
+            "projectId": "proj-1",
+            "subtaskProgress": {"total": 2, "done": 1},
+            "subtasks": [
+                {"title": "Sub A", "status": "done"},
+                {"title": "Sub B", "status": "todo"},
+            ],
+        },
+        "Parent task",
+    )
+
+    assert "subtaskProgress: 1/2 done" in line
+    assert "Sub A (done)" in line
+    assert "parentTaskId" not in line
+
+
+def test_apply_subtask_parent_from_refs_uses_selected_task():
+    refs = [
+        {
+            "taskId": "parent-1",
+            "organizationId": "org-1",
+            "projectId": "proj-1",
+            "title": "Parent",
+        }
+    ]
+    result = _apply_subtask_parent_from_refs(
+        {"title": "Child"},
+        refs,
+        "add a subtask called Child",
+    )
+
+    assert result["parent_task_id"] == "parent-1"
+    assert result["organization_id"] == "org-1"
+    assert result["project_id"] == "proj-1"
+
+
+def test_looks_like_subtask_mutation():
+    assert _looks_like_subtask_mutation("add a subtask for deploy")
+    assert not _looks_like_subtask_mutation("mark selected done")
+
+
+@pytest.mark.asyncio
+async def test_create_task_passes_parent_task_id():
+    client = MagicMock()
+    client.request = AsyncMock(
+        return_value={
+            "id": "child-1",
+            "title": "Child",
+            "parentTaskId": "parent-1",
+        }
+    )
+    tools = TodoTools(client)
+
+    result = await tools.create_task(
+        organization_id="org-1",
+        project_id="proj-1",
+        title="Child",
+        parent_task_id="parent-1",
+    )
+
+    assert result["parentTaskId"] == "parent-1"
+    assert client.request.await_args.kwargs["json_body"]["parentTaskId"] == "parent-1"
+

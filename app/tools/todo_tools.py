@@ -41,6 +41,7 @@ class TodoTools:
         project_id: str | None = None,
         status: str | None = None,
         criticity: str | None = None,
+        parent_task_id: str | None = None,
     ) -> Any:
         params: dict[str, str] = {}
         if organization_id:
@@ -51,6 +52,8 @@ class TodoTools:
             params["status"] = status
         if criticity:
             params["criticity"] = criticity
+        if parent_task_id:
+            params["parentTaskId"] = parent_task_id
         return await self._client.request("GET", "/tasks", params=params or None)
 
     async def create_task(
@@ -63,6 +66,7 @@ class TodoTools:
         status: str = "todo",
         criticity: str = "medium",
         due_date: str | None = None,
+        parent_task_id: str | None = None,
     ) -> Any:
         body: dict[str, Any] = {
             "title": title,
@@ -73,6 +77,8 @@ class TodoTools:
             body["description"] = description
         if due_date:
             body["dueDate"] = due_date
+        if parent_task_id:
+            body["parentTaskId"] = parent_task_id
         return await self._client.request(
             "POST",
             f"/organizations/{organization_id}/projects/{project_id}/tasks",
@@ -102,6 +108,7 @@ class TodoTools:
                     status=task.get("status") or "todo",
                     criticity=task.get("criticity") or "medium",
                     due_date=task.get("due_date"),
+                    parent_task_id=task.get("parent_task_id") or task.get("parent_id"),
                 )
                 created.append(result)
             except Exception as exc:
@@ -120,6 +127,7 @@ class TodoTools:
         criticity: str | None = None,
         due_date: str | None = None,
         new_project_id: str | None = None,
+        parent_task_id: str | None = None,
     ) -> Any:
         body: dict[str, Any] = {}
         if title is not None:
@@ -134,6 +142,8 @@ class TodoTools:
             body["dueDate"] = due_date
         if new_project_id is not None:
             body["projectId"] = new_project_id
+        if parent_task_id is not None:
+            body["parentTaskId"] = parent_task_id
         return await self._client.request(
             "PATCH",
             f"/organizations/{organization_id}/projects/{project_id}/tasks/{task_id}",
@@ -192,7 +202,7 @@ class TodoTools:
         updated: list[str] = []
         failed: list[dict[str, str]] = []
         results: list[dict[str, Any]] = []
-        update_fields = ("title", "description", "status", "criticity", "due_date")
+        update_fields = ("title", "description", "status", "criticity", "due_date", "parent_task_id")
         for task in tasks:
             task_id = task["task_id"]
             try:
@@ -298,6 +308,8 @@ async def execute_todo_tool(
                 project_id=arguments.get("project_id"),
                 status=arguments.get("status"),
                 criticity=arguments.get("criticity"),
+                parent_task_id=arguments.get("parent_task_id")
+                or arguments.get("parent_id"),
             )
         if tool_name == "create_task":
             return await tools.create_task(**arguments)
