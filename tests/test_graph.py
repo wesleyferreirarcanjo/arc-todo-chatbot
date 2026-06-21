@@ -15,7 +15,9 @@ from app.graph.nodes import (
     _extract_move_target_hint,
     _format_task_context_line,
     _looks_like_move_mutation,
+    _looks_like_reparent_mutation,
     _looks_like_subtask_mutation,
+    _resolve_reparent_arguments,
     resolve_delete_tasks_arguments,
     resolve_get_tasks_arguments,
     resolve_move_tasks_arguments,
@@ -1511,4 +1513,54 @@ async def test_create_task_passes_parent_task_id():
 
     assert result["parentTaskId"] == "parent-1"
     assert client.request.await_args.kwargs["json_body"]["parentTaskId"] == "parent-1"
+
+
+def test_resolve_reparent_arguments_with_two_selected_tasks():
+    refs = [
+        {
+            "taskId": "child-1",
+            "organizationId": "org-1",
+            "projectId": "proj-1",
+            "title": "Child",
+        },
+        {
+            "taskId": "parent-1",
+            "organizationId": "org-1",
+            "projectId": "proj-1",
+            "title": "Parent",
+        },
+    ]
+    result = _resolve_reparent_arguments(
+        "make Child a subtask of Parent",
+        refs,
+    )
+
+    assert result is not None
+    assert result["task_id"] == "child-1"
+    assert result["parent_task_id"] == "parent-1"
+
+
+def test_apply_subtask_parent_from_refs_for_create_tasks():
+    refs = [
+        {
+            "taskId": "parent-1",
+            "organizationId": "org-1",
+            "projectId": "proj-1",
+            "title": "Parent",
+        }
+    ]
+    result = _apply_subtask_parent_from_refs(
+        {"tasks": [{"title": "A"}, {"title": "B"}]},
+        refs,
+        "add subtasks A and B",
+    )
+
+    assert result["parent_task_id"] == "parent-1"
+    assert result["tasks"][0]["parent_task_id"] == "parent-1"
+    assert result["tasks"][1]["parent_task_id"] == "parent-1"
+
+
+def test_looks_like_reparent_mutation():
+    assert _looks_like_reparent_mutation("make this a subtask of the other task")
+    assert not _looks_like_reparent_mutation("mark selected done")
 

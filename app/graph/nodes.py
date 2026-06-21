@@ -55,7 +55,10 @@ When the user asks for a description (including creative or matching description
 Use create_tasks (not create_task) when the user asks to create more than one task in the same project.
 Tasks support one parent level: a parent task may have direct subtasks via parent_task_id. Subtasks cannot have subtasks.
 When the user asks to add a subtask under a selected parent task, use create_task with parent_task_id from Selected task context.
-When the user marks a parent task done, the API completes all subtasks. When all subtasks are done, the API completes the parent.
+When the user asks to create a parent with subtasks, use create_task for the parent first, then create_tasks with the same parent_task_id from the created parent id.
+When the user asks to make one task a subtask of another, use update_task on the child with parent_task_id set to the parent task id.
+When two tasks are selected and the user wants hierarchy, treat the parent as the task they call "parent"/"under"/"of", and the child as the task to attach.
+Use update_task with parent_task_id null to detach a subtask from its parent.
 Use route "direct" for greetings, general help, or when no API action is needed.
 Ask the user a clarifying question only when organization/project scope, destructive intent, or target task identity is genuinely ambiguous.
 Prefer provided organization_id and project_id context when present; omit organization_id/project_id from tool_arguments when context is already provided.
@@ -505,7 +508,64 @@ def _needs_mutation_tool_result(state: ChatGraphState) -> bool:
 
 
 def _looks_like_subtask_mutation(message: str) -> bool:
-    return bool(re.search(r"\b(?:subtask|sub-task|sub task)\b", message, re.I))
+    return bool(re.search(r"\b(?:subtasks?|sub-tasks?|sub tasks?)\b", message, re.I))
+
+
+def _looks_like_reparent_mutation(message: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:subtask of|child of|under(?:\s+the)?\s+task|attach(?:\s+to)?|"
+            r"make .+ (?:a )?subtask(?:\s+of)?|set parent|move under|detach from parent)\b",
+            message,
+            re.I,
+        )
+    )
+
+
+def _looks_like_detach_subtask(message: str) -> bool:
+    return bool(re.search(r"\b(?:detach|remove)\b.*\b(?:parent|subtask)\b", message, re.I))
+
+
+def _resolve_reparent_arguments(
+    message: str,
+    task_refs: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    if _looks_like_detach_subtask(message):
+        refs = _effective_task_refs(task_refs, message)
+        if len(refs) != 1:
+            return None
+        child_id = _ref_task_id(refs[0])
+        if not child_id:
+            return None
+        ref = refs[0]
+        return {
+            "organization_id": ref.get("organizationId") or ref.get("organization_id"),
+            "project_id": ref.get("projectId") or ref.get("project_id"),
+            "task_id": child_id,
+            "parent_task_id": None,
+        }
+
+    if not _looks_like_reparent_mutation(message):
+        return None
+
+    refs = _effective_task_refs(task_refs, message)
+    if len(refs) < 2:
+        return None
+
+    child_ref = refs[0]
+    parent_ref = refs[1]
+    child_id = _ref_task_id(child_ref)
+    parent_id = _ref_task_id(parent_ref)
+    if not child_id or not parent_id or child_id == parent_id:
+        return None
+
+    return {
+        "organization_id": child_ref.get("organizationId")
+        or child_ref.get("organization_id"),
+        "project_id": child_ref.get("projectId") or child_ref.get("project_id"),
+        "task_id": child_id,
+        "parent_task_id": parent_id,
+    }
 
 
 def _apply_subtask_parent_from_refs(
@@ -528,6 +588,14 @@ def _apply_subtask_parent_from_refs(
 
     updated = dict(arguments)
     updated["parent_task_id"] = parent_id
+    tasks = updated.get("tasks")
+    if isinstance(tasks, list):
+        updated["tasks"] = [
+            {**task, "parent_task_id": parent_id}
+            if isinstance(task, dict) and not task.get("parent_task_id")
+            else task
+            for task in tasks
+        ]
     if not updated.get("organization_id"):
         updated["organization_id"] = refs[0].get("organizationId") or refs[0].get(
             "organization_id"
@@ -1604,6 +1672,11 @@ def _format_action_success_line(action: dict[str, Any]) -> str:
         return f"- Created {len(created)} task(s){suffix}: {titles}"
     if tool_name == "update_task":
         title = result.get("title") or "task"
+        parent_task_id = result.get("parentTaskId") or result.get("parent_task_id")
+        if parent_task_id is None and action.get("tool_arguments", {}).get("parent_task_id") is None:
+            return f"- Detached **{title}** from parent"
+        if parent_task_id:
+            return f"- Set **{title}** as subtask of {parent_task_id}"
         return f"- Updated **{title}**"
     if tool_name == "update_tasks":
         updated = result.get("updated") or []
@@ -1834,6 +1907,14 @@ async def _execute_single_tool(
         arguments = _apply_task_ref_source_scope(arguments, task_refs)
 
     if apply_heuristics:
+        reparent_arguments = _resolve_reparent_arguments(
+            latest_user_message,
+            task_refs,
+        )
+        if reparent_arguments:
+            tool_name = "update_task"
+            arguments = reparent_arguments
+
         if task_refs and _looks_like_move_mutation(latest_user_message):
             tool_name = "move_tasks"
             arguments = {
@@ -1845,7 +1926,7 @@ async def _execute_single_tool(
 
         if task_refs and _looks_like_update_mutation(latest_user_message) and not _looks_like_move_mutation(
             latest_user_message
-        ):
+        ) and not _looks_like_reparent_mutation(latest_user_message):
             tool_name = "update_tasks"
             if isinstance(arguments.get("tasks"), list):
                 arguments = {
