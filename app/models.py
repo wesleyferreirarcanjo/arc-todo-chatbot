@@ -15,6 +15,7 @@ class TaskRef(BaseModel):
     organization_id: str = Field(alias="organizationId")
     project_id: str = Field(alias="projectId")
     title: str
+    display_id: str | None = Field(default=None, alias="displayId")
 
     model_config = {"populate_by_name": True}
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.arc_todo_client import ArcTodoClient, ArcTodoApiError
+from app.task_id_resolver import is_friendly_task_id, is_uuid
 
 
 class TodoTools:
@@ -34,6 +35,36 @@ class TodoTools:
             params["message"] = message
         return await self._client.request("GET", "/scope/resolve", params=params or None)
 
+    async def resolve_task(self, *, identifier: str) -> Any:
+        return await self._client.request(
+            "GET",
+            "/tasks/resolve",
+            params={"identifier": identifier},
+        )
+
+    async def _resolve_task_scope(
+        self,
+        *,
+        organization_id: str,
+        project_id: str,
+        task_id: str,
+    ) -> tuple[str, str, str]:
+        if is_uuid(task_id):
+            return organization_id, project_id, task_id
+
+        resolved = await self.resolve_task(identifier=task_id)
+        return (
+            resolved["organizationId"],
+            resolved["projectId"],
+            resolved["id"],
+        )
+
+    async def _resolve_parent_task_id(self, parent_task_id: str | None) -> str | None:
+        if not parent_task_id or is_uuid(parent_task_id):
+            return parent_task_id
+        resolved = await self.resolve_task(identifier=parent_task_id)
+        return resolved["id"]
+
     async def list_tasks(
         self,
         *,
@@ -53,7 +84,7 @@ class TodoTools:
         if criticity:
             params["criticity"] = criticity
         if parent_task_id:
-            params["parentTaskId"] = parent_task_id
+            params["parentTaskId"] = await self._resolve_parent_task_id(parent_task_id)
         return await self._client.request("GET", "/tasks", params=params or None)
 
     async def create_task(
@@ -78,7 +109,7 @@ class TodoTools:
         if due_date:
             body["dueDate"] = due_date
         if parent_task_id:
-            body["parentTaskId"] = parent_task_id
+            body["parentTaskId"] = await self._resolve_parent_task_id(parent_task_id)
         return await self._client.request(
             "POST",
             f"/organizations/{organization_id}/projects/{project_id}/tasks",
@@ -143,7 +174,12 @@ class TodoTools:
         if new_project_id is not None:
             body["projectId"] = new_project_id
         if parent_task_id is not None:
-            body["parentTaskId"] = parent_task_id
+            body["parentTaskId"] = await self._resolve_parent_task_id(parent_task_id)
+        organization_id, project_id, task_id = await self._resolve_task_scope(
+            organization_id=organization_id,
+            project_id=project_id,
+            task_id=task_id,
+        )
         return await self._client.request(
             "PATCH",
             f"/organizations/{organization_id}/projects/{project_id}/tasks/{task_id}",
@@ -157,6 +193,11 @@ class TodoTools:
         project_id: str,
         task_id: str,
     ) -> Any:
+        organization_id, project_id, task_id = await self._resolve_task_scope(
+            organization_id=organization_id,
+            project_id=project_id,
+            task_id=task_id,
+        )
         return await self._client.request(
             "GET",
             f"/organizations/{organization_id}/projects/{project_id}/tasks/{task_id}",
@@ -169,6 +210,11 @@ class TodoTools:
         project_id: str,
         task_id: str,
     ) -> Any:
+        organization_id, project_id, task_id = await self._resolve_task_scope(
+            organization_id=organization_id,
+            project_id=project_id,
+            task_id=task_id,
+        )
         return await self._client.request(
             "DELETE",
             f"/organizations/{organization_id}/projects/{project_id}/tasks/{task_id}",

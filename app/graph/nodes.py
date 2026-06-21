@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 from app.arc_todo_client import ArcTodoApiError, ArcTodoClient
 from app.chatbot_settings import ChatbotRuntimeSettings
 from app.graph.state import ChatGraphState
+from app.task_id_resolver import is_friendly_task_id, normalize_friendly_task_id
 from app.tools.todo_tools import TodoTools, execute_todo_tool
 
 SYSTEM_PROMPT = """You are Arc Todo assistant. Help users manage tasks in Arc Todo.
@@ -46,7 +47,7 @@ Available tools:
 - delete_task {"organization_id": string, "project_id": string, "task_id": string}
 - delete_tasks {"task_ids": string[]|null} — delete multiple selected tasks; omit task_ids to use all taskIds from Selected task context
 
-Use get_tasks, update_tasks, move_tasks, or delete_tasks (not the single-task variants) when the user wants to act on more than one selected task.
+Task identifiers may be official UUID taskId values or friendly display IDs like arc-1 or #arc-1. Selected task context includes displayId when available.
 Use move_tasks (not move_task) when the user wants to move more than one selected task.
 When Selected task context is present, keep the task in its current organization_id/project_id and only change the destination project for move requests.
 When Selected task context lists multiple tasks and the user asks to add or create descriptions, return update_tasks with a tasks array containing a distinct description for each task_id based on that task's title.
@@ -184,6 +185,7 @@ def _format_task_context_line(task: dict[str, Any], fallback_title: str) -> str:
     due_date = task.get("dueDate") or task.get("due_date") or "none"
     description = (task.get("description") or "").strip() or "none"
     task_id = task.get("id", "unknown")
+    display_id = task.get("displayId") or task.get("display_id")
     organization_id = task.get("organizationId") or task.get("organization_id")
     project_id = task.get("projectId") or task.get("project_id")
     parent_task_id = task.get("parentTaskId") or task.get("parent_task_id")
@@ -191,6 +193,10 @@ def _format_task_context_line(task: dict[str, Any], fallback_title: str) -> str:
     subtask_progress = task.get("subtaskProgress") or task.get("subtask_progress")
     lines = [
         f"- taskId: {task_id}",
+    ]
+    if display_id:
+        lines.append(f"  displayId: {display_id}")
+    lines.extend([
         f"  title: {title}",
         f"  status: {status}",
         f"  criticity: {criticity}",
@@ -198,7 +204,7 @@ def _format_task_context_line(task: dict[str, Any], fallback_title: str) -> str:
         f"  projectId: {project_id}",
         f"  dueDate: {due_date}",
         f"  description: {description}",
-    ]
+    ])
     if parent_task_id:
         lines.append(f"  parentTaskId: {parent_task_id}")
     if isinstance(subtask_progress, dict) and subtask_progress.get("total"):
@@ -266,6 +272,45 @@ def _ref_task_id(ref: dict[str, str]) -> str | None:
     return ref.get("taskId") or ref.get("task_id")
 
 
+def _ref_display_id(ref: dict[str, str]) -> str | None:
+    return ref.get("displayId") or ref.get("display_id")
+
+
+def _normalize_task_identifier(value: str) -> str:
+    if is_friendly_task_id(value):
+        return normalize_friendly_task_id(value)
+    return value
+
+
+def _ref_matches_task_identifier(ref: dict[str, str], identifier: str) -> bool:
+    if not identifier:
+        return False
+
+    normalized = _normalize_task_identifier(identifier)
+    task_id = _ref_task_id(ref)
+    if task_id and (task_id == identifier or task_id == normalized):
+        return True
+
+    display_id = _ref_display_id(ref)
+    if display_id and _normalize_task_identifier(display_id) == normalized:
+        return True
+
+    return False
+
+
+def _task_ref_lookup(task_refs: list[dict[str, str]]) -> dict[str, dict[str, str]]:
+    lookup: dict[str, dict[str, str]] = {}
+    for ref in task_refs:
+        task_id = _ref_task_id(ref)
+        if task_id:
+            lookup[task_id] = ref
+        display_id = _ref_display_id(ref)
+        if display_id:
+            lookup[display_id] = ref
+            lookup[_normalize_task_identifier(display_id)] = ref
+    return lookup
+
+
 def _ref_organization_id(ref: dict[str, str]) -> str | None:
     return ref.get("organizationId") or ref.get("organization_id")
 
@@ -285,7 +330,7 @@ def _apply_task_ref_source_scope(
     task_id = resolved.get("task_id")
     if task_id:
         for ref in task_refs:
-            if _ref_task_id(ref) != task_id:
+            if not _ref_matches_task_identifier(ref, task_id):
                 continue
             org_id = _ref_organization_id(ref)
             project_id = _ref_project_id(ref)
@@ -1064,15 +1109,13 @@ def _batch_task_scopes(
     task_ids: list[str],
     task_refs: list[dict[str, str]],
 ) -> list[dict[str, str]]:
-    ref_by_id = {
-        tid: ref
-        for ref in task_refs
-        if (tid := _ref_task_id(ref))
-    }
+    ref_by_identifier = _task_ref_lookup(task_refs)
 
     tasks: list[dict[str, str]] = []
     for task_id in task_ids:
-        ref = ref_by_id.get(task_id)
+        ref = ref_by_identifier.get(task_id) or ref_by_identifier.get(
+            _normalize_task_identifier(task_id),
+        )
         if not ref:
             continue
         organization_id = _ref_organization_id(ref)
@@ -1083,7 +1126,7 @@ def _batch_task_scopes(
             {
                 "organization_id": organization_id,
                 "project_id": project_id,
-                "task_id": task_id,
+                "task_id": _ref_task_id(ref) or task_id,
             }
         )
     return tasks
