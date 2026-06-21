@@ -357,6 +357,8 @@ def _looks_like_multi_create(message: str) -> bool:
 
 
 def _looks_like_update_mutation(message: str) -> bool:
+    if re.search(r"\bcreate\b", message, re.I) and _looks_like_subtask_mutation(message):
+        return False
     return bool(
         re.search(
             r"\b(update|edit|change|set|mark|complete|describe|fix|correct|rewrite)\b"
@@ -509,6 +511,140 @@ def _needs_mutation_tool_result(state: ChatGraphState) -> bool:
 
 def _looks_like_subtask_mutation(message: str) -> bool:
     return bool(re.search(r"\b(?:subtasks?|sub-tasks?|sub tasks?)\b", message, re.I))
+
+
+def _looks_like_create_parent_with_subtasks(message: str) -> bool:
+    if not re.search(r"\bcreate\b", message, re.I):
+        return False
+    if not _looks_like_subtask_mutation(message):
+        return False
+    if _looks_like_reparent_mutation(message):
+        return False
+    return bool(
+        re.search(
+            r"(?:"
+            r"create\s+(?:a\s+)?(?:parent\s+)?tasks?\s+.+\s+and\s+create\s+(?:the\s+)?subtasks?"
+            r"|create\s+(?:a\s+)?(?:parent\s+)?tasks?\s+.+\s+with\s+subtasks?"
+            r"|\bfor\s+(?:it|them|that)\b"
+            r")",
+            message,
+            re.I,
+        )
+    )
+
+
+def _clean_parsed_task_title(title: str) -> str:
+    cleaned = title.strip(" .,\"'")
+    cleaned = re.sub(
+        r"\s+in\s+(?:my\s+)?[^,\n]+?\s+project\s*$",
+        "",
+        cleaned,
+        flags=re.I,
+    )
+    cleaned = re.sub(r"\s+in\s+my\s+.+$", "", cleaned, flags=re.I)
+    return cleaned.strip(" .,\"'")
+
+
+def _split_subtask_titles(raw: str) -> list[str]:
+    text = raw.strip()
+    text = re.sub(r"\s+give\s+.+$", "", text, flags=re.I)
+    text = re.sub(
+        r"\s+(?:for\s+)?(?:testing(?:\s+purpose)?|each)\b.*$",
+        "",
+        text,
+        flags=re.I,
+    )
+    if "," in text:
+        parts = re.split(r"\s*,\s*", text)
+    else:
+        parts = re.split(r"\s+and\s+|\s+", text)
+    return [part.strip(" .,\"'") for part in parts if part.strip(" .,\"'")]
+
+
+def _parse_create_parent_with_subtasks(message: str) -> dict[str, Any] | None:
+    if not _looks_like_create_parent_with_subtasks(message):
+        return None
+
+    patterns = (
+        r"create\s+(?:a\s+)?(?:parent\s+)?tasks?\s+(.+?)\s+and\s+create\s+(?:the\s+)?subtasks?\s+(.+?)(?:\s+for\s+(?:it|them|that))?(?:\s+give|\s*$)",
+        r"create\s+(?:a\s+)?(?:parent\s+)?tasks?\s+(.+?)\s+with\s+subtasks?\s+(.+?)(?:\s+give|\s*$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, message, re.I | re.S)
+        if not match:
+            continue
+        parent_title = _clean_parsed_task_title(match.group(1))
+        subtask_titles = _split_subtask_titles(match.group(2))
+        if parent_title and subtask_titles:
+            return {
+                "parent_title": parent_title,
+                "subtask_titles": subtask_titles,
+            }
+    return None
+
+
+def _build_create_parent_with_subtasks_actions(
+    state: ChatGraphState,
+    parsed: dict[str, Any],
+) -> list[dict[str, Any]]:
+    scope = {
+        key: state[key]
+        for key in ("organization_id", "project_id")
+        if _is_uuid(state.get(key))
+    }
+    parent_title = parsed["parent_title"]
+    return [
+        {
+            "intent": f"create parent task {parent_title}",
+            "tool_name": "create_task",
+            "tool_arguments": {**scope, "title": parent_title},
+        },
+        {
+            "intent": f"create subtasks for {parent_title}",
+            "tool_name": "create_tasks",
+            "tool_arguments": {
+                **scope,
+                "_parent_from_previous": True,
+                "tasks": [{"title": title} for title in parsed["subtask_titles"]],
+            },
+        },
+    ]
+
+
+def _inject_parent_from_previous(
+    arguments: dict[str, Any],
+    tool_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not arguments.pop("_parent_from_previous", None):
+        return arguments
+
+    updated = dict(arguments)
+    parent_id = None
+    parent_title = None
+    for prev in reversed(tool_results):
+        if prev.get("tool_name") != "create_task" or not prev.get("success"):
+            continue
+        result = prev.get("tool_result") or {}
+        parent_id = result.get("id")
+        parent_title = result.get("title")
+        if parent_id:
+            break
+
+    if not parent_id:
+        return updated
+
+    updated["parent_task_id"] = parent_id
+    if parent_title:
+        updated["_parent_title"] = parent_title
+    tasks = updated.get("tasks")
+    if isinstance(tasks, list):
+        updated["tasks"] = [
+            {**task, "parent_task_id": parent_id}
+            if isinstance(task, dict) and not task.get("parent_task_id")
+            else task
+            for task in tasks
+        ]
+    return updated
 
 
 def _looks_like_reparent_mutation(message: str) -> bool:
@@ -873,6 +1009,9 @@ def _coerce_mutation_tool(
     if project_hint and not _is_uuid(coerced.get("project_id")):
         coerced["project_id"] = project_hint
 
+    if _looks_like_create_parent_with_subtasks(message):
+        return tool_name, arguments
+
     if tool_name in {"create_task", "create_tasks"}:
         if titles:
             if len(titles) > 1 or tool_name == "create_tasks":
@@ -1228,21 +1367,29 @@ async def scope_discovery_agent(state: ChatGraphState) -> ChatGraphState:
     )
 
     if _looks_like_create_mutation(message) and scope_status == "resolved":
-        tool_name, tool_arguments = _coerce_mutation_tool(
-            updates,
-            "create_tasks",
-            dict(updates.get("tool_arguments") or {}),
-        )
-        updates["route"] = "tools"
-        updates["tool_name"] = tool_name
-        updates["tool_arguments"] = tool_arguments
-        updates["actions"] = [
-            {
-                "intent": "create tasks",
-                "tool_name": tool_name,
-                "tool_arguments": tool_arguments,
-            }
-        ]
+        parsed_parent = _parse_create_parent_with_subtasks(message)
+        if parsed_parent:
+            actions = _build_create_parent_with_subtasks_actions(updates, parsed_parent)
+            updates["route"] = "tools"
+            updates["tool_name"] = actions[0]["tool_name"]
+            updates["tool_arguments"] = actions[0]["tool_arguments"]
+            updates["actions"] = actions
+        else:
+            tool_name, tool_arguments = _coerce_mutation_tool(
+                updates,
+                "create_tasks",
+                dict(updates.get("tool_arguments") or {}),
+            )
+            updates["route"] = "tools"
+            updates["tool_name"] = tool_name
+            updates["tool_arguments"] = tool_arguments
+            updates["actions"] = [
+                {
+                    "intent": "create tasks",
+                    "tool_name": tool_name,
+                    "tool_arguments": tool_arguments,
+                }
+            ]
 
     return updates
 
@@ -1669,6 +1816,14 @@ def _format_action_success_line(action: dict[str, Any]) -> str:
             f"**{item.get('title') or item.get('id')}**" for item in created[:5]
         )
         suffix = " (partial)" if partial else ""
+        parent_task_id = action.get("tool_arguments", {}).get("parent_task_id")
+        parent_title = action.get("tool_arguments", {}).get("_parent_title")
+        if parent_task_id:
+            parent_label = parent_title or parent_task_id
+            return (
+                f"- Created {len(created)} subtask(s) under **{parent_label}**{suffix}: "
+                f"{titles}"
+            )
         return f"- Created {len(created)} task(s){suffix}: {titles}"
     if tool_name == "update_task":
         title = result.get("title") or "task"
@@ -2030,7 +2185,9 @@ async def _execute_single_tool(
                 },
             )
             return tool_name, arguments, None, validation_error
-        result = await execute_todo_tool(tools, tool_name, arguments)
+        api_arguments = dict(arguments)
+        api_arguments.pop("_parent_title", None)
+        result = await execute_todo_tool(tools, tool_name, api_arguments)
         return tool_name, arguments, result, None
     except ArcTodoApiError as exc:
         return tool_name, arguments, None, str(exc)
@@ -2064,7 +2221,24 @@ async def todo_tools_agent(
 
     for action in actions:
         tool_name = action["tool_name"]
-        arguments = dict(action.get("tool_arguments") or {})
+        raw_arguments = dict(action.get("tool_arguments") or {})
+        needs_parent = bool(raw_arguments.get("_parent_from_previous"))
+        arguments = _inject_parent_from_previous(raw_arguments, tool_results)
+        if needs_parent and not arguments.get("parent_task_id"):
+            tool_results.append(
+                {
+                    "intent": action.get("intent") or tool_name,
+                    "tool_name": tool_name,
+                    "tool_arguments": arguments,
+                    "tool_result": None,
+                    "error": "Could not resolve parent task from previous create step",
+                    "success": False,
+                    "partial": False,
+                }
+            )
+            last_tool_name = tool_name
+            last_error = "Could not resolve parent task from previous create step"
+            continue
         executed_name, executed_args, result, error = await _execute_single_tool(
             state,
             runtime,

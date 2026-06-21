@@ -8,6 +8,7 @@ from app.graph.nodes import (
     _apply_subtask_parent_from_refs,
     _apply_task_ref_source_scope,
     _best_scope_match,
+    _build_create_parent_with_subtasks_actions,
     _build_mutation_failure_response,
     _catalog_from_scope_result,
     _coerce_mutation_tool,
@@ -31,7 +32,9 @@ from app.graph.nodes import (
     scope_discovery_agent,
     todo_tools_agent,
     _is_uuid,
+    _inject_parent_from_previous,
     _looks_like_create_mutation,
+    _looks_like_create_parent_with_subtasks,
     _looks_like_task_mutation,
     _extract_proposed_descriptions_from_assistant,
     _filter_task_refs_by_message,
@@ -43,6 +46,7 @@ from app.graph.nodes import (
     _mutation_succeeded,
     _normalize_planner_actions,
     _normalize_tool_arguments,
+    _parse_create_parent_with_subtasks,
     _parse_create_task_titles,
     _validate_mutation_arguments,
     _build_verified_mutation_response,
@@ -1563,4 +1567,116 @@ def test_apply_subtask_parent_from_refs_for_create_tasks():
 def test_looks_like_reparent_mutation():
     assert _looks_like_reparent_mutation("make this a subtask of the other task")
     assert not _looks_like_reparent_mutation("mark selected done")
+
+
+def test_parse_create_parent_with_subtasks():
+    message = (
+        "create a task teste-parent in arc-todo project and create the subtask "
+        "teste-1 teste-2 and teste-3 for it give a random description for each "
+        "for testing purpose"
+    )
+    assert _looks_like_create_parent_with_subtasks(message)
+    parsed = _parse_create_parent_with_subtasks(message)
+    assert parsed == {
+        "parent_title": "teste-parent",
+        "subtask_titles": ["teste-1", "teste-2", "teste-3"],
+    }
+
+
+def test_build_create_parent_with_subtasks_actions():
+    state = {
+        "organization_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "22222222-2222-4222-8222-222222222222",
+    }
+    actions = _build_create_parent_with_subtasks_actions(
+        state,
+        {
+            "parent_title": "teste-parent",
+            "subtask_titles": ["teste-1", "teste-2", "teste-3"],
+        },
+    )
+    assert len(actions) == 2
+    assert actions[0]["tool_name"] == "create_task"
+    assert actions[0]["tool_arguments"]["title"] == "teste-parent"
+    assert actions[1]["tool_name"] == "create_tasks"
+    assert actions[1]["tool_arguments"]["_parent_from_previous"] is True
+    assert [task["title"] for task in actions[1]["tool_arguments"]["tasks"]] == [
+        "teste-1",
+        "teste-2",
+        "teste-3",
+    ]
+
+
+def test_inject_parent_from_previous():
+    tool_results = [
+        {
+            "tool_name": "create_task",
+            "success": True,
+            "tool_result": {"id": "parent-1", "title": "teste-parent"},
+        }
+    ]
+    arguments = {
+        "_parent_from_previous": True,
+        "tasks": [{"title": "teste-1"}, {"title": "teste-2"}],
+    }
+    result = _inject_parent_from_previous(arguments, tool_results)
+    assert result["parent_task_id"] == "parent-1"
+    assert result["_parent_title"] == "teste-parent"
+    assert result["tasks"][0]["parent_task_id"] == "parent-1"
+    assert result["tasks"][1]["parent_task_id"] == "parent-1"
+
+
+@pytest.mark.asyncio
+async def test_todo_tools_agent_creates_parent_then_linked_subtasks():
+    parent_result = {"id": "parent-1", "title": "teste-parent"}
+    subtask_results = {
+        "created": [
+            {"id": "sub-1", "title": "teste-1", "parentTaskId": "parent-1"},
+            {"id": "sub-2", "title": "teste-2", "parentTaskId": "parent-1"},
+        ],
+        "failed": [],
+    }
+
+    with patch("app.graph.nodes._execute_single_tool", new_callable=AsyncMock) as execute_mock:
+        execute_mock.side_effect = [
+            ("create_task", {"title": "teste-parent"}, parent_result, None),
+            (
+                "create_tasks",
+                {
+                    "parent_task_id": "parent-1",
+                    "_parent_title": "teste-parent",
+                    "tasks": [
+                        {"title": "teste-1", "parent_task_id": "parent-1"},
+                        {"title": "teste-2", "parent_task_id": "parent-1"},
+                    ],
+                },
+                subtask_results,
+                None,
+            ),
+        ]
+
+        state = await todo_tools_agent(
+            {
+                "user_token": "token",
+                "actions": _build_create_parent_with_subtasks_actions(
+                    {
+                        "organization_id": "11111111-1111-4111-8111-111111111111",
+                        "project_id": "22222222-2222-4222-8222-222222222222",
+                    },
+                    {
+                        "parent_title": "teste-parent",
+                        "subtask_titles": ["teste-1", "teste-2"],
+                    },
+                ),
+            }
+        )
+
+    assert execute_mock.await_count == 2
+    second_call_args = execute_mock.await_args_list[1].kwargs["arguments"]
+    assert second_call_args["parent_task_id"] == "parent-1"
+    assert all(
+        task["parent_task_id"] == "parent-1"
+        for task in second_call_args["tasks"]
+    )
+    assert state["tool_results"][1]["success"] is True
 
