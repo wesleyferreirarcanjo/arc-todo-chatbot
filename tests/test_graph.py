@@ -431,6 +431,39 @@ async def test_create_tasks_tool_calls_create_task_for_each():
 
 
 @pytest.mark.asyncio
+async def test_create_tasks_tool_applies_top_level_parent_task_id():
+    client = MagicMock()
+    client.request = AsyncMock(side_effect=[{"id": "sub-1"}, {"id": "sub-2"}])
+    tools = TodoTools(client)
+
+    result = await execute_todo_tool(
+        tools,
+        "create_tasks",
+        {
+            "organization_id": "org1",
+            "project_id": "proj1",
+            "parent_task_id": "parent-1",
+            "tasks": [
+                {"title": "Sub one"},
+                {"title": "Sub two"},
+            ],
+        },
+    )
+
+    assert len(result["created"]) == 2
+    client.request.assert_any_await(
+        "POST",
+        "/organizations/org1/projects/proj1/tasks",
+        json_body={
+            "title": "Sub one",
+            "status": "todo",
+            "criticity": "medium",
+            "parentTaskId": "parent-1",
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_tasks_tool_calls_get_task_for_each():
     client = MagicMock()
     client.request = AsyncMock(side_effect=[{"id": "t1"}, {"id": "t2"}])
@@ -1620,7 +1653,7 @@ def test_inject_parent_from_previous():
         "tasks": [{"title": "teste-1"}, {"title": "teste-2"}],
     }
     result = _inject_parent_from_previous(arguments, tool_results)
-    assert result["parent_task_id"] == "parent-1"
+    assert "parent_task_id" not in result
     assert result["_parent_title"] == "teste-parent"
     assert result["tasks"][0]["parent_task_id"] == "parent-1"
     assert result["tasks"][1]["parent_task_id"] == "parent-1"
@@ -1673,7 +1706,6 @@ async def test_todo_tools_agent_creates_parent_then_linked_subtasks():
 
     assert execute_mock.await_count == 2
     second_call_args = execute_mock.await_args_list[1].kwargs["arguments"]
-    assert second_call_args["parent_task_id"] == "parent-1"
     assert all(
         task["parent_task_id"] == "parent-1"
         for task in second_call_args["tasks"]

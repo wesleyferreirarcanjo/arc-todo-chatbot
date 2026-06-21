@@ -633,7 +633,6 @@ def _inject_parent_from_previous(
     if not parent_id:
         return updated
 
-    updated["parent_task_id"] = parent_id
     if parent_title:
         updated["_parent_title"] = parent_title
     tasks = updated.get("tasks")
@@ -645,6 +644,16 @@ def _inject_parent_from_previous(
             for task in tasks
         ]
     return updated
+
+
+def _create_tasks_have_parent(arguments: dict[str, Any]) -> bool:
+    tasks = arguments.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        return False
+    return all(
+        isinstance(task, dict) and task.get("parent_task_id")
+        for task in tasks
+    )
 
 
 def _looks_like_reparent_mutation(message: str) -> bool:
@@ -1818,6 +1827,12 @@ def _format_action_success_line(action: dict[str, Any]) -> str:
         suffix = " (partial)" if partial else ""
         parent_task_id = action.get("tool_arguments", {}).get("parent_task_id")
         parent_title = action.get("tool_arguments", {}).get("_parent_title")
+        if not parent_task_id:
+            tasks = action.get("tool_arguments", {}).get("tasks") or []
+            if isinstance(tasks, list) and tasks:
+                first = tasks[0]
+                if isinstance(first, dict):
+                    parent_task_id = first.get("parent_task_id")
         if parent_task_id:
             parent_label = parent_title or parent_task_id
             return (
@@ -2224,7 +2239,7 @@ async def todo_tools_agent(
         raw_arguments = dict(action.get("tool_arguments") or {})
         needs_parent = bool(raw_arguments.get("_parent_from_previous"))
         arguments = _inject_parent_from_previous(raw_arguments, tool_results)
-        if needs_parent and not arguments.get("parent_task_id"):
+        if needs_parent and not _create_tasks_have_parent(arguments):
             tool_results.append(
                 {
                     "intent": action.get("intent") or tool_name,

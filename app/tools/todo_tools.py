@@ -314,7 +314,20 @@ async def execute_todo_tool(
         if tool_name == "create_task":
             return await tools.create_task(**arguments)
         if tool_name == "create_tasks":
-            return await tools.create_tasks(**arguments)
+            tasks = list(arguments.get("tasks") or [])
+            parent_task_id = arguments.get("parent_task_id") or arguments.get("parent_id")
+            if parent_task_id:
+                tasks = [
+                    {**task, "parent_task_id": task.get("parent_task_id") or parent_task_id}
+                    if isinstance(task, dict)
+                    else task
+                    for task in tasks
+                ]
+            return await tools.create_tasks(
+                organization_id=arguments["organization_id"],
+                project_id=arguments["project_id"],
+                tasks=tasks,
+            )
         if tool_name == "update_task":
             return await tools.update_task(**arguments)
         if tool_name == "update_tasks":
