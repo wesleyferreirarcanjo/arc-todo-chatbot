@@ -39,7 +39,8 @@ Python FastAPI chatbot service deployed in Coolify project **`arc-todo`** on ser
 | API `arc-todo-api` | `lmsx2avrg1k29ex12w6e3gce` | `http://lmsx2avrg1k29ex12w6e3gce.72.60.59.203.sslip.io` |
 | Frontend `arc-todo-web` | `ifo33mi1s8efs8myb5g441vh` | Chat UI at `/chat`, settings at `/settings/chatbot` |
 | MCP `arc-todo-mcp` | `qv9bek5he3ns8upu71rphbrc` | Shares the same Arc Todo API endpoints |
-| PostgreSQL `arc-todo-postgres` | `bibl6ncxa3xkph2r8ubmbl4t` | Stores chatbot settings via API |
+| PostgreSQL `arc-todo-postgres-pgvector` | `x420nshn1p0cjzlhomi0cbnk` | Stores chatbot settings via API |
+| RAG `arc-todo-rag` | `tqfgi4rhtndy3xtgdep04xnd` | `http://tqfgi4rhtndy3xtgdep04xnd.72.60.59.203.sslip.io` |
 
 ## Environment variables (production)
 
@@ -59,11 +60,12 @@ DeepSeek provider settings (`provider`, `baseUrl`, `model`, `apiKey`, `temperatu
 
 ## Deploy order
 
-1. Ensure `arc-todo-postgres` is `running:healthy`.
+1. Ensure `arc-todo-postgres-pgvector` is `running:healthy`.
 2. Deploy / restart `arc-todo-api` so the `chatbot_settings` migration runs.
-3. Deploy `arc-todo-web` with `VITE_CHAT_API_BASE_URL` set to this service URL.
-4. Configure chatbot settings at `/settings/chatbot` in the web app.
-5. Deploy / restart `arc-todo-chatbot`.
+3. Deploy `arc-todo-web` with `VITE_API_BASE_URL` and `VITE_CHAT_API_BASE_URL` set to their service URLs.
+4. Configure chatbot settings at `/settings/chatbot` and RAG settings at `/settings/rag` in the web app.
+5. Deploy / restart `arc-todo-rag` (see [../arc-todo-rag/coolify.md](../arc-todo-rag/coolify.md)).
+6. Deploy / restart `arc-todo-chatbot`.
 
 ## Health-check verification checklist
 
@@ -78,4 +80,4 @@ DeepSeek provider settings (`provider`, `baseUrl`, `model`, `apiKey`, `temperatu
 - The chatbot forwards the web user's bearer token to `arc-todo-api` for todo actions.
 - Runtime AI settings are fetched from the API; do not put DeepSeek secrets in this service's env vars.
 - Git source uses the Coolify deploy key (`private_key_uuid`: `lms2y9fjpybdznft4t7uf3td`).
-- See [../arc-todo-api/coolify.md](../arc-todo-api/coolify.md), [../arc-todo-web/coolify.md](../arc-todo-web/coolify.md), and [../arc-todo-mcp/coolify.md](../arc-todo-mcp/coolify.md).
+- See [../arc-todo-api/coolify.md](../arc-todo-api/coolify.md), [../arc-todo-web/coolify.md](../arc-todo-web/coolify.md), [../arc-todo-mcp/coolify.md](../arc-todo-mcp/coolify.md), and [../arc-todo-rag/coolify.md](../arc-todo-rag/coolify.md).
