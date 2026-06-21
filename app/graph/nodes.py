@@ -20,10 +20,16 @@ You can answer questions about todos and perform actions using available tools.
 When organization or project context is missing, ask the user to clarify or use list_organizations and list_projects first.
 Keep responses concise and practical."""
 
+MAX_PLANNED_ACTIONS = 5
+
 PLANNER_PROMPT = """Analyze the latest user message and decide whether todo API tools are needed.
 
 Return JSON only with this shape:
-{"route":"direct"|"tools","tool_name":string|null,"tool_arguments":object}
+{"route":"direct"|"tools","actions":[{"intent":string,"tool_name":string,"tool_arguments":object}]}
+
+You may plan up to 5 ordered actions when the user asks for multiple things in one message.
+Example: create two tasks with descriptions -> one create_tasks action with both tasks and descriptions filled in.
+Example: create a task and mark another selected task done -> two actions: create_task, then update_tasks.
 
 Available tools:
 - list_organizations {}
@@ -45,16 +51,19 @@ Use move_tasks (not move_task) when the user wants to move more than one selecte
 When Selected task context is present, keep the task in its current organization_id/project_id and only change the destination project for move requests.
 When Selected task context lists multiple tasks and the user asks to add or create descriptions, return update_tasks with a tasks array containing a distinct description for each task_id based on that task's title.
 When the user asks to fix, change, or rewrite descriptions for selected tasks, call update_tasks immediately with appropriate per-task descriptions; do not ask for confirmation first.
-Use create_tasks (not create_task) when the user asks to create more than one task.
+When the user asks for a description (including creative or matching descriptions) and none is provided, infer a reasonable description from the task title and request — do not ask the user to supply it.
+Use create_tasks (not create_task) when the user asks to create more than one task in the same project.
 Use route "direct" for greetings, general help, or when no API action is needed.
+Ask the user a clarifying question only when organization/project scope, destructive intent, or target task identity is genuinely ambiguous.
 Prefer provided organization_id and project_id context when present; omit organization_id/project_id from tool_arguments when context is already provided.
-Never invent organization_id or project_id values from organization or project names in the user message — names like "arc-todo" are not UUIDs. Omit those fields and rely on context, or use list_organizations/list_projects first."""
+Never invent organization_id or project_id values from organization or project names in the user message — names like "arc-todo" are not UUIDs. Omit those fields and rely on context, or use list_organizations/list_projects first.
+The API field for priority is criticity (low|medium|high|critical), not priority."""
 
-RESPONSE_PROMPT = """Write a concise assistant reply for the user based on the conversation and any tool results.
+RESPONSE_PROMPT = """Write a concise assistant reply for the user based on the conversation and verified action results.
 Do not mention internal tool names unless helpful.
-Never claim that tasks were created, updated, or deleted unless Tool result confirms it with task ids or a non-empty created/updated/deleted list.
-If Error is present, explain that the action failed and include the error.
-If no Tool result is present for a mutation request, say you could not perform the action yet."""
+Never claim that tasks were created, updated, or deleted unless verified action results confirm it.
+If an action failed or was partial, say so honestly.
+If no verified action results are present for a mutation request, say you could not perform the action yet."""
 
 MUTATION_TOOLS = {
     "create_task",
@@ -67,10 +76,12 @@ MUTATION_TOOLS = {
     "delete_tasks",
 }
 
+UPDATE_TASK_FIELDS = ("title", "description", "status", "criticity", "due_date")
+
 PLANNER_MUTATION_RETRY = (
     "\nIMPORTANT: The user is asking to create, update, or delete tasks. "
-    'Return route "tools" with the appropriate tool and arguments. '
-    "Do not answer directly."
+    'Return route "tools" with one or more actions in the actions array. '
+    "Infer missing descriptions when requested. Do not answer directly."
 )
 
 
@@ -92,6 +103,70 @@ def _extract_json(text: str) -> dict[str, Any]:
         if not match:
             raise
         return json.loads(match.group(0))
+
+
+def _normalize_tool_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(arguments)
+    if "priority" in normalized and "criticity" not in normalized:
+        normalized["criticity"] = normalized.pop("priority")
+    raw_tasks = normalized.get("tasks")
+    if isinstance(raw_tasks, list):
+        normalized["tasks"] = [
+            _normalize_tool_arguments(task) if isinstance(task, dict) else task
+            for task in raw_tasks
+        ]
+    return normalized
+
+
+def _normalize_planner_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = payload.get("actions")
+    normalized: list[dict[str, Any]] = []
+    if isinstance(actions, list):
+        for item in actions[:MAX_PLANNED_ACTIONS]:
+            if not isinstance(item, dict):
+                continue
+            tool_name = item.get("tool_name")
+            if not isinstance(tool_name, str) or not tool_name:
+                continue
+            normalized.append(
+                {
+                    "intent": str(item.get("intent") or tool_name),
+                    "tool_name": tool_name,
+                    "tool_arguments": _normalize_tool_arguments(
+                        item.get("tool_arguments") or {}
+                    ),
+                }
+            )
+    if normalized:
+        return normalized
+
+    tool_name = payload.get("tool_name")
+    if isinstance(tool_name, str) and tool_name:
+        return [
+            {
+                "intent": tool_name,
+                "tool_name": tool_name,
+                "tool_arguments": _normalize_tool_arguments(
+                    payload.get("tool_arguments") or {}
+                ),
+            }
+        ]
+    return []
+
+
+def _update_arguments_have_fields(tool_name: str, arguments: dict[str, Any]) -> bool:
+    if tool_name == "update_task":
+        return any(arguments.get(key) is not None for key in UPDATE_TASK_FIELDS)
+    if tool_name == "update_tasks":
+        raw_tasks = arguments.get("tasks")
+        if isinstance(raw_tasks, list) and raw_tasks:
+            return any(
+                any(item.get(key) is not None for key in UPDATE_TASK_FIELDS)
+                for item in raw_tasks
+                if isinstance(item, dict)
+            )
+        return any(arguments.get(key) is not None for key in UPDATE_TASK_FIELDS)
+    return True
 
 
 def _format_task_context_line(task: dict[str, Any], fallback_title: str) -> str:
@@ -419,39 +494,82 @@ def _looks_like_create_mutation(message: str) -> bool:
     return False
 
 
+def _action_succeeded(
+    tool_name: str,
+    result: Any,
+    error: str | None,
+) -> tuple[bool, bool]:
+    partial = False
+    if tool_name not in MUTATION_TOOLS:
+        return (error is None and result is not None, False)
+    if error:
+        return (False, False)
+    if result is None:
+        return (False, False)
+    if not isinstance(result, dict):
+        return (True, False)
+
+    if tool_name == "create_task":
+        return (bool(result.get("id")), False)
+    if tool_name == "create_tasks":
+        created = result.get("created") or []
+        failed = result.get("failed") or []
+        if created and failed:
+            return (True, True)
+        return (len(created) > 0 and not failed, False)
+    if tool_name == "update_task":
+        return (bool(result.get("id")), False)
+    if tool_name == "update_tasks":
+        updated = result.get("updated") or []
+        failed = result.get("failed") or []
+        if updated and failed:
+            return (True, True)
+        return (len(updated) > 0 and not failed, False)
+    if tool_name == "move_task":
+        return (bool(result.get("id")), False)
+    if tool_name == "move_tasks":
+        moved = result.get("moved") or []
+        failed = result.get("failed") or []
+        if moved and failed:
+            return (True, True)
+        return (len(moved) > 0 and not failed, False)
+    if tool_name == "delete_task":
+        return (True, False)
+    if tool_name == "delete_tasks":
+        deleted = result.get("deleted") or []
+        failed = result.get("failed") or []
+        if deleted and failed:
+            return (True, True)
+        return (len(deleted) > 0 and not failed, False)
+    return (True, False)
+
+
 def _mutation_succeeded(state: ChatGraphState) -> bool | None:
     if state.get("route") != "tools":
         return None
 
+    tool_results = state.get("tool_results") or []
+    if tool_results:
+        mutation_results = [
+            item for item in tool_results if item.get("tool_name") in MUTATION_TOOLS
+        ]
+        if not mutation_results:
+            return None
+        if all(item.get("success") for item in mutation_results):
+            return True
+        if any(item.get("success") for item in mutation_results):
+            return False
+        return False
+
     tool_name = state.get("tool_name")
     if tool_name not in MUTATION_TOOLS:
         return None
-    if state.get("error"):
-        return False
-
-    result = state.get("tool_result")
-    if result is None:
-        return False
-    if not isinstance(result, dict):
-        return True
-
-    if tool_name == "create_task":
-        return bool(result.get("id"))
-    if tool_name == "create_tasks":
-        return len(result.get("created", [])) > 0 and not result.get("failed")
-    if tool_name == "update_task":
-        return bool(result.get("id"))
-    if tool_name == "update_tasks":
-        return len(result.get("updated", [])) > 0 and not result.get("failed")
-    if tool_name == "move_task":
-        return bool(result.get("id"))
-    if tool_name == "move_tasks":
-        return len(result.get("moved", [])) > 0 and not result.get("failed")
-    if tool_name == "delete_task":
-        return True
-    if tool_name == "delete_tasks":
-        return len(result.get("deleted", [])) > 0 and not result.get("failed")
-    return True
+    success, _partial = _action_succeeded(
+        tool_name,
+        state.get("tool_result"),
+        state.get("error"),
+    )
+    return success
 
 
 def _build_mutation_failure_response(state: ChatGraphState) -> str:
@@ -532,6 +650,9 @@ def _validate_mutation_arguments(tool_name: str, arguments: dict[str, Any]) -> s
         tasks = arguments.get("tasks")
         if not isinstance(tasks, list) or not tasks:
             return "No tasks to create"
+    if tool_name in {"update_task", "update_tasks"}:
+        if not _update_arguments_have_fields(tool_name, arguments):
+            return "No fields to update"
     return None
 
 
@@ -692,8 +813,6 @@ def _batch_task_scopes(
         )
     return tasks
 
-
-UPDATE_TASK_FIELDS = ("title", "description", "status", "criticity", "due_date")
 
 SINGLE_TO_BATCH_TOOL = {
     "get_task": "get_tasks",
@@ -990,6 +1109,13 @@ async def scope_discovery_agent(state: ChatGraphState) -> ChatGraphState:
         updates["route"] = "tools"
         updates["tool_name"] = tool_name
         updates["tool_arguments"] = tool_arguments
+        updates["actions"] = [
+            {
+                "intent": "create tasks",
+                "tool_name": tool_name,
+                "tool_arguments": tool_arguments,
+            }
+        ]
 
     return updates
 
@@ -999,14 +1125,35 @@ def _needs_scope_retry(state: ChatGraphState) -> bool:
         return False
     if state.get("scope_status") in {"ambiguous", "not_found"}:
         return False
-    if state.get("tool_name") not in MUTATION_TOOLS:
+
+    tool_results = state.get("tool_results") or []
+    if tool_results:
+        failed_create = any(
+            item.get("tool_name") in {"create_task", "create_tasks"}
+            and not item.get("success")
+            for item in tool_results
+        )
+        if not failed_create:
+            return False
+    elif state.get("tool_name") not in MUTATION_TOOLS:
         return False
-    if _mutation_succeeded(state) is True:
+    elif _mutation_succeeded(state) is True:
         return False
+
     error = (state.get("error") or "").lower()
     if "scope" in error:
         return True
-    if state.get("tool_name") in {"create_task", "create_tasks"}:
+
+    create_tools = {"create_task", "create_tasks"}
+    if tool_results:
+        if any(item.get("tool_name") in create_tools for item in tool_results):
+            if not _is_uuid(state.get("organization_id")) or not _is_uuid(
+                state.get("project_id")
+            ):
+                return True
+        return False
+
+    if state.get("tool_name") in create_tools:
         if not _is_uuid(state.get("organization_id")) or not _is_uuid(state.get("project_id")):
             return True
     return False
@@ -1087,6 +1234,75 @@ def _build_per_task_updates_from_arguments(
             merged.append({**scope, **fields})
 
     return merged or None
+
+
+async def _generate_task_description_from_title(
+    runtime: ChatbotRuntimeSettings,
+    *,
+    title: str,
+    message: str,
+) -> str:
+    model = build_model(runtime)
+    result = await model.ainvoke(
+        [
+            SystemMessage(
+                content=(
+                    "Write a concise, creative task description that matches the title "
+                    "and user request. Return JSON only: "
+                    '{"description":"<description>"}'
+                )
+            ),
+            HumanMessage(content=f"User request:\n{message}\n\nTask title:\n{title}"),
+        ]
+    )
+    payload = _extract_json(str(result.content))
+    description = payload.get("description")
+    if isinstance(description, str) and description.strip():
+        return description.strip()
+    return f"Scope: {title}."
+
+
+async def _maybe_generate_create_descriptions(
+    runtime: ChatbotRuntimeSettings | None,
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    message: str,
+) -> dict[str, Any]:
+    if not runtime:
+        return arguments
+    wants_description = bool(
+        re.search(r"\b(?:description|detail|note)\b", message, re.I)
+    )
+    if not wants_description:
+        return arguments
+
+    updated = dict(arguments)
+    if tool_name == "create_task" and updated.get("title") and not updated.get(
+        "description"
+    ):
+        updated["description"] = await _generate_task_description_from_title(
+            runtime,
+            title=str(updated["title"]),
+            message=message,
+        )
+    if tool_name == "create_tasks":
+        tasks = updated.get("tasks")
+        if isinstance(tasks, list):
+            enriched: list[dict[str, Any]] = []
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                item = dict(task)
+                if item.get("title") and not item.get("description"):
+                    item["description"] = await _generate_task_description_from_title(
+                        runtime,
+                        title=str(item["title"]),
+                        message=message,
+                    )
+                enriched.append(item)
+            updated["tasks"] = enriched
+    return updated
 
 
 async def _generate_per_task_descriptions(
@@ -1187,6 +1403,24 @@ async def resolve_update_tasks_arguments_async(
             tasks.append(payload)
         return {"tasks": tasks}
 
+    if len(scopes) == 1 and runtime and wants_descriptions and not updates.get(
+        "description"
+    ):
+        scope = scopes[0]
+        task_id = scope["task_id"]
+        ref = next((ref for ref in task_refs if _ref_task_id(ref) == task_id), None)
+        title = (ref or {}).get("title") or "Task"
+        description = await _generate_task_description_from_title(
+            runtime,
+            title=str(title),
+            message=latest_user_message,
+        )
+        payload = {**scope, "description": description}
+        for key, value in updates.items():
+            if key != "description":
+                payload[key] = value
+        return {"tasks": [payload]}
+
     return {
         "tasks": [{**scope, **updates} for scope in scopes],
     }
@@ -1286,6 +1520,111 @@ async def context_agent(state: ChatGraphState) -> ChatGraphState:
     }
 
 
+def _format_action_success_line(action: dict[str, Any]) -> str:
+    tool_name = action.get("tool_name")
+    result = action.get("tool_result")
+    intent = action.get("intent") or tool_name
+    partial = action.get("partial")
+
+    if not isinstance(result, dict):
+        return f"- {intent}: completed"
+
+    if tool_name == "create_task":
+        title = result.get("title") or "task"
+        task_id = result.get("id") or "unknown"
+        return f"- Created **{title}** (id: {task_id})"
+    if tool_name == "create_tasks":
+        created = result.get("created") or []
+        titles = ", ".join(
+            f"**{item.get('title') or item.get('id')}**" for item in created[:5]
+        )
+        suffix = " (partial)" if partial else ""
+        return f"- Created {len(created)} task(s){suffix}: {titles}"
+    if tool_name == "update_task":
+        title = result.get("title") or "task"
+        return f"- Updated **{title}**"
+    if tool_name == "update_tasks":
+        updated = result.get("updated") or []
+        suffix = " (partial)" if partial else ""
+        return f"- Updated {len(updated)} task(s){suffix}"
+    if tool_name == "move_task":
+        title = result.get("title") or "task"
+        return f"- Moved **{title}**"
+    if tool_name == "move_tasks":
+        moved = result.get("moved") or []
+        suffix = " (partial)" if partial else ""
+        return f"- Moved {len(moved)} task(s){suffix}"
+    if tool_name == "delete_task":
+        return f"- Deleted task"
+    if tool_name == "delete_tasks":
+        deleted = result.get("deleted") or []
+        suffix = " (partial)" if partial else ""
+        return f"- Deleted {len(deleted)} task(s){suffix}"
+    return f"- {intent}: completed"
+
+
+def _format_action_failure_line(action: dict[str, Any]) -> str:
+    intent = action.get("intent") or action.get("tool_name")
+    error = action.get("error") or "action failed"
+    result = action.get("tool_result")
+    if isinstance(result, dict) and result.get("failed"):
+        failed = result["failed"]
+        details = "; ".join(
+            str(item.get("error") or item.get("title") or item.get("task_id") or item)
+            for item in failed[:3]
+        )
+        return f"- {intent}: failed ({details})"
+    return f"- {intent}: failed ({error})"
+
+
+def _build_verified_mutation_response(state: ChatGraphState) -> str | None:
+    tool_results = state.get("tool_results") or []
+    if not tool_results and state.get("tool_name") in MUTATION_TOOLS:
+        success, partial = _action_succeeded(
+            state.get("tool_name") or "",
+            state.get("tool_result"),
+            state.get("error"),
+        )
+        tool_results = [
+            {
+                "intent": state.get("tool_name"),
+                "tool_name": state.get("tool_name"),
+                "tool_result": state.get("tool_result"),
+                "error": state.get("error"),
+                "success": success,
+                "partial": partial,
+            }
+        ]
+
+    mutation_results = [
+        item for item in tool_results if item.get("tool_name") in MUTATION_TOOLS
+    ]
+    if not mutation_results:
+        return None
+
+    success_lines = [
+        _format_action_success_line(item) for item in mutation_results if item.get("success")
+    ]
+    failure_lines = [
+        _format_action_failure_line(item)
+        for item in mutation_results
+        if not item.get("success")
+    ]
+
+    if success_lines and failure_lines:
+        intro = (
+            f"I completed {len(success_lines)} of "
+            f"{len(mutation_results)} requested actions:"
+        )
+    elif success_lines:
+        intro = "Done:"
+    else:
+        intro = "I couldn't complete the requested actions:"
+
+    lines = [intro, *success_lines, *failure_lines]
+    return "\n".join(lines)
+
+
 async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) -> ChatGraphState:
     messages = state.get("messages", [])
     task_refs = state.get("task_refs", [])
@@ -1298,6 +1637,13 @@ async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) 
             return {
                 **state,
                 "route": "tools",
+                "actions": [
+                    {
+                        "intent": "apply proposed descriptions",
+                        "tool_name": "update_tasks",
+                        "tool_arguments": apply_arguments,
+                    }
+                ],
                 "tool_name": "update_tasks",
                 "tool_arguments": apply_arguments,
             }
@@ -1343,31 +1689,47 @@ async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) 
             payload = retry_payload
             route = "tools"
 
+        if retry_route == "tools" and (
+            retry_payload.get("actions") or retry_payload.get("tool_name")
+        ):
+            payload = retry_payload
+            route = "tools"
+
+    actions = _normalize_planner_actions(payload)
+    if route == "tools" and not actions:
+        route = "direct"
+
     logger.info(
-        "planner route=%s tool=%s org=%s project=%s",
+        "planner route=%s actions=%s org=%s project=%s",
         route,
-        payload.get("tool_name"),
+        [action.get("tool_name") for action in actions],
         state.get("organization_id"),
         state.get("project_id"),
     )
 
-    return {
+    updates: ChatGraphState = {
         **state,
         "route": route,
-        "tool_name": payload.get("tool_name"),
-        "tool_arguments": payload.get("tool_arguments") or {},
+        "actions": actions,
     }
+    if actions:
+        updates["tool_name"] = actions[0]["tool_name"]
+        updates["tool_arguments"] = actions[0]["tool_arguments"]
+    else:
+        updates["tool_name"] = None
+        updates["tool_arguments"] = {}
+    return updates
 
 
-async def todo_tools_agent(
+async def _execute_single_tool(
     state: ChatGraphState,
-    runtime: ChatbotRuntimeSettings | None = None,
-) -> ChatGraphState:
-    tool_name = state.get("tool_name")
-    if not tool_name:
-        return {**state, "error": "Planner did not select a tool"}
-
-    arguments = dict(state.get("tool_arguments") or {})
+    runtime: ChatbotRuntimeSettings | None,
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    apply_heuristics: bool = True,
+) -> tuple[str, dict[str, Any], Any, str | None]:
+    arguments = _normalize_tool_arguments(dict(arguments or {}))
     if not _is_uuid(arguments.get("organization_id")) and _is_uuid(state.get("organization_id")):
         arguments["organization_id"] = state["organization_id"]
     elif not arguments.get("organization_id") and state.get("organization_id"):
@@ -1409,38 +1771,39 @@ async def todo_tools_agent(
     if task_refs and tool_name in EXISTING_TASK_TOOLS:
         arguments = _apply_task_ref_source_scope(arguments, task_refs)
 
-    if task_refs and _looks_like_move_mutation(latest_user_message):
-        tool_name = "move_tasks"
-        arguments = {
-            key: value
-            for key, value in arguments.items()
-            if key in {"task_ids", "target_project_id", "target_project_hint"}
-        }
-        arguments.setdefault("task_ids", None)
-
-    if task_refs and _looks_like_update_mutation(latest_user_message) and not _looks_like_move_mutation(
-        latest_user_message
-    ):
-        tool_name = "update_tasks"
-        if isinstance(arguments.get("tasks"), list):
+    if apply_heuristics:
+        if task_refs and _looks_like_move_mutation(latest_user_message):
+            tool_name = "move_tasks"
             arguments = {
-                "tasks": arguments["tasks"],
-                "task_ids": arguments.get("task_ids"),
-            }
-        else:
-            arguments = {
-                key: arguments[key]
-                for key in UPDATE_TASK_FIELDS
-                if key in arguments and arguments[key] is not None
+                key: value
+                for key, value in arguments.items()
+                if key in {"task_ids", "target_project_id", "target_project_hint"}
             }
             arguments.setdefault("task_ids", None)
 
-    tool_name, arguments = _coerce_mutation_tool(state, tool_name, arguments)
+        if task_refs and _looks_like_update_mutation(latest_user_message) and not _looks_like_move_mutation(
+            latest_user_message
+        ):
+            tool_name = "update_tasks"
+            if isinstance(arguments.get("tasks"), list):
+                arguments = {
+                    "tasks": arguments["tasks"],
+                    "task_ids": arguments.get("task_ids"),
+                }
+            else:
+                arguments = {
+                    key: arguments[key]
+                    for key in UPDATE_TASK_FIELDS
+                    if key in arguments and arguments[key] is not None
+                }
+                arguments.setdefault("task_ids", None)
+
+        tool_name, arguments = _coerce_mutation_tool(state, tool_name, arguments)
 
     if task_refs and tool_name in EXISTING_TASK_TOOLS:
         arguments = _apply_task_ref_source_scope(arguments, task_refs)
 
-    if (
+    if apply_heuristics and (
         tool_name in SINGLE_TO_BATCH_TOOL
         and len(task_refs) > 1
         and (
@@ -1449,7 +1812,6 @@ async def todo_tools_agent(
             or (not arguments.get("task_id") and not arguments.get("task_ids"))
         )
     ):
-        # ponytail: heuristic upgrade when planner picks single-task tool for bulk intent
         batch_arguments = dict(arguments)
         batch_arguments.setdefault("task_ids", None)
         tool_name = SINGLE_TO_BATCH_TOOL[tool_name]
@@ -1468,12 +1830,7 @@ async def todo_tools_agent(
             if tool_name == "move_task":
                 tasks = move_arguments.get("tasks") or []
                 if len(tasks) != 1:
-                    return {
-                        **state,
-                        "tool_result": None,
-                        "used_tools": list(state.get("used_tools", [])),
-                        "error": "Could not resolve selected task for move",
-                    }
+                    return tool_name, arguments, None, "Could not resolve selected task for move"
                 task = tasks[0]
                 arguments = {
                     "organization_id": task["organization_id"],
@@ -1500,6 +1857,12 @@ async def todo_tools_agent(
 
         if tool_name in {"create_task", "create_tasks"}:
             arguments.pop("task_ids", None)
+            arguments = await _maybe_generate_create_descriptions(
+                runtime,
+                tool_name=tool_name,
+                arguments=arguments,
+                message=latest_user_message,
+            )
 
         arguments = await resolve_scope_arguments(
             tools,
@@ -1513,44 +1876,88 @@ async def todo_tools_agent(
                 "mutation validation failed tool=%s error=%s args=%s",
                 tool_name,
                 validation_error,
-                {key: arguments.get(key) for key in ("organization_id", "project_id", "title", "tasks")},
+                {
+                    key: arguments.get(key)
+                    for key in ("organization_id", "project_id", "title", "tasks")
+                },
             )
-            return {
-                **state,
-                "tool_result": None,
-                "used_tools": list(state.get("used_tools", [])),
-                "error": validation_error,
-            }
+            return tool_name, arguments, None, validation_error
         result = await execute_todo_tool(tools, tool_name, arguments)
-        logger.info(
-            "tool executed tool=%s success=%s",
-            tool_name,
-            _mutation_succeeded({**state, "tool_result": result, "error": None}),
-        )
+        return tool_name, arguments, result, None
     except ArcTodoApiError as exc:
-        return {
-            **state,
-            "tool_result": None,
-            "used_tools": list(state.get("used_tools", [])),
-            "error": str(exc),
-        }
+        return tool_name, arguments, None, str(exc)
     except Exception as exc:
-        return {
-            **state,
-            "tool_result": None,
-            "used_tools": list(state.get("used_tools", [])),
-            "error": str(exc),
-        }
+        return tool_name, arguments, None, str(exc)
 
+
+async def todo_tools_agent(
+    state: ChatGraphState,
+    runtime: ChatbotRuntimeSettings | None = None,
+) -> ChatGraphState:
+    actions = list(state.get("actions") or [])
+    if not actions and state.get("tool_name"):
+        actions = [
+            {
+                "intent": state.get("tool_name") or "action",
+                "tool_name": state["tool_name"],
+                "tool_arguments": dict(state.get("tool_arguments") or {}),
+            }
+        ]
+
+    if not actions:
+        return {**state, "error": "Planner did not select a tool"}
+
+    apply_heuristics = len(actions) == 1
+    tool_results: list[dict[str, Any]] = []
     used_tools = list(state.get("used_tools", []))
-    used_tools.append(tool_name)
+    last_tool_name: str | None = None
+    last_tool_result: Any = None
+    last_error: str | None = None
 
+    for action in actions:
+        tool_name = action["tool_name"]
+        arguments = dict(action.get("tool_arguments") or {})
+        executed_name, executed_args, result, error = await _execute_single_tool(
+            state,
+            runtime,
+            tool_name=tool_name,
+            arguments=arguments,
+            apply_heuristics=apply_heuristics,
+        )
+        success, partial = _action_succeeded(executed_name, result, error)
+        tool_results.append(
+            {
+                "intent": action.get("intent") or executed_name,
+                "tool_name": executed_name,
+                "tool_arguments": executed_args,
+                "tool_result": result,
+                "error": error,
+                "success": success,
+                "partial": partial,
+            }
+        )
+        if executed_name not in used_tools:
+            used_tools.append(executed_name)
+        last_tool_name = executed_name
+        last_tool_result = result
+        last_error = error
+        logger.info(
+            "tool executed tool=%s success=%s partial=%s",
+            executed_name,
+            success,
+            partial,
+        )
+
+    any_success = any(item.get("success") for item in tool_results)
     return {
         **state,
-        "tool_name": tool_name,
-        "tool_result": result,
+        "route": "tools",
+        "actions": actions,
+        "tool_results": tool_results,
+        "tool_name": last_tool_name,
+        "tool_result": last_tool_result,
         "used_tools": used_tools,
-        "error": None,
+        "error": None if any_success else last_error,
     }
 
 
@@ -1560,12 +1967,23 @@ async def response_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings)
     ):
         return {**state, "response": _build_mutation_failure_response(state)}
 
+    if _needs_mutation_tool_result(state):
+        verified = _build_verified_mutation_response(state)
+        if verified:
+            return {**state, "response": verified}
+
     model = build_model(runtime)
     conversation = "\n".join(
         f"{message['role']}: {message['content']}" for message in state.get("messages", [])
     )
     tool_context = ""
-    if state.get("tool_result") is not None:
+    tool_results = state.get("tool_results") or []
+    if tool_results:
+        tool_context = (
+            "\nVerified action results:\n"
+            + json.dumps(tool_results, indent=2, default=str)
+        )
+    elif state.get("tool_result") is not None:
         tool_context = f"\nTool result:\n{json.dumps(state['tool_result'], indent=2, default=str)}"
     if state.get("error"):
         tool_context += f"\nError:\n{state['error']}"
@@ -1586,6 +2004,10 @@ async def response_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings)
             succeeded is None and state.get("route") == "direct"
         ):
             response_text = _build_mutation_failure_response(state)
+        else:
+            verified = _build_verified_mutation_response(state)
+            if verified:
+                response_text = verified
 
     return {**state, "response": response_text}
 
@@ -1613,6 +2035,8 @@ def route_after_tools(state: ChatGraphState) -> str:
 
 
 def route_after_planner(state: ChatGraphState) -> str:
-    if state.get("route") == "tools" and state.get("tool_name"):
+    if state.get("route") == "tools" and (
+        state.get("actions") or state.get("tool_name")
+    ):
         return "todo_tools_agent"
     return "response_agent"

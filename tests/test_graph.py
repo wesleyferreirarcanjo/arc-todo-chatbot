@@ -35,7 +35,13 @@ from app.graph.nodes import (
     planner_agent,
     _match_scope_name,
     _mutation_succeeded,
+    _normalize_planner_actions,
+    _normalize_tool_arguments,
     _parse_create_task_titles,
+    _validate_mutation_arguments,
+    _build_verified_mutation_response,
+    _action_succeeded,
+    response_agent,
 )
 from app.tools.todo_tools import TodoTools, execute_todo_tool
 
@@ -1186,3 +1192,248 @@ async def test_todo_tools_agent_move_task_uses_source_scope_from_task_ref():
         }
     ]
     assert state["error"] is None
+
+
+def test_normalize_planner_actions_from_actions_array():
+    actions = _normalize_planner_actions(
+        {
+            "route": "tools",
+            "actions": [
+                {
+                    "intent": "create task one",
+                    "tool_name": "create_task",
+                    "tool_arguments": {"title": "One"},
+                },
+                {
+                    "intent": "create task two",
+                    "tool_name": "create_task",
+                    "tool_arguments": {"title": "Two"},
+                },
+            ],
+        }
+    )
+    assert len(actions) == 2
+    assert actions[0]["tool_name"] == "create_task"
+    assert actions[1]["tool_arguments"]["title"] == "Two"
+
+
+def test_normalize_planner_actions_legacy_single_tool():
+    actions = _normalize_planner_actions(
+        {
+            "route": "tools",
+            "tool_name": "list_tasks",
+            "tool_arguments": {},
+        }
+    )
+    assert actions == [{"intent": "list_tasks", "tool_name": "list_tasks", "tool_arguments": {}}]
+
+
+def test_normalize_tool_arguments_maps_priority_to_criticity():
+    args = _normalize_tool_arguments({"priority": "high", "tasks": [{"priority": "low"}]})
+    assert args["criticity"] == "high"
+    assert args["tasks"][0]["criticity"] == "low"
+    assert "priority" not in args
+
+
+def test_validate_mutation_arguments_rejects_empty_update():
+    error = _validate_mutation_arguments("update_tasks", {"tasks": []})
+    assert error == "No fields to update"
+
+
+def test_action_succeeded_detects_partial_batch_update():
+    success, partial = _action_succeeded(
+        "update_tasks",
+        {"updated": ["t1"], "failed": [{"task_id": "t2", "error": "nope"}]},
+        None,
+    )
+    assert success is True
+    assert partial is True
+
+
+def test_build_verified_mutation_response_reports_partial_success():
+    message = _build_verified_mutation_response(
+        {
+            "route": "tools",
+            "tool_results": [
+                {
+                    "intent": "create first task",
+                    "tool_name": "create_task",
+                    "tool_result": {"id": "t1", "title": "First"},
+                    "error": None,
+                    "success": True,
+                    "partial": False,
+                },
+                {
+                    "intent": "create second task",
+                    "tool_name": "create_task",
+                    "tool_result": None,
+                    "error": "Missing task title",
+                    "success": False,
+                    "partial": False,
+                },
+            ],
+        }
+    )
+    assert message is not None
+    assert "1 of 2" in message
+    assert "First" in message
+    assert "failed" in message
+
+
+@pytest.mark.asyncio
+async def test_todo_tools_agent_executes_multiple_planned_actions():
+    with patch("app.graph.nodes.ArcTodoClient"), patch(
+        "app.graph.nodes.TodoTools",
+    ), patch(
+        "app.graph.nodes._execute_single_tool",
+        new=AsyncMock(
+            side_effect=[
+                ("create_task", {"title": "One"}, {"id": "t1", "title": "One"}, None),
+                ("update_tasks", {"tasks": []}, {"updated": ["t2"], "failed": []}, None),
+            ]
+        ),
+    ) as execute_mock:
+        state = await todo_tools_agent(
+            {
+                "user_token": "token",
+                "actions": [
+                    {
+                        "intent": "create task",
+                        "tool_name": "create_task",
+                        "tool_arguments": {"title": "One"},
+                    },
+                    {
+                        "intent": "mark selected done",
+                        "tool_name": "update_tasks",
+                        "tool_arguments": {"status": "done", "task_ids": ["t2"]},
+                    },
+                ],
+                "task_refs": [
+                    {
+                        "taskId": "t2",
+                        "organizationId": "org1",
+                        "projectId": "proj1",
+                        "title": "Two",
+                    }
+                ],
+                "latest_user_message": "create a task One and mark the selected task done",
+                "used_tools": [],
+            }
+        )
+
+    assert execute_mock.await_count == 2
+    assert len(state["tool_results"]) == 2
+    assert state["tool_results"][0]["success"] is True
+    assert state["tool_results"][1]["success"] is True
+    assert state["used_tools"] == ["create_task", "update_tasks"]
+
+
+@pytest.mark.asyncio
+async def test_todo_tools_agent_generates_create_description_when_requested():
+    with patch("app.graph.nodes.ArcTodoClient"), patch(
+        "app.graph.nodes.TodoTools",
+    ), patch(
+        "app.graph.nodes.resolve_scope_arguments",
+        new=AsyncMock(side_effect=lambda tools, **kwargs: kwargs["arguments"]),
+    ), patch(
+        "app.graph.nodes._maybe_generate_create_descriptions",
+        new=AsyncMock(
+            side_effect=lambda runtime, **kwargs: {
+                **kwargs["arguments"],
+                "description": "Creative description for the task.",
+            }
+        ),
+    ), patch(
+        "app.graph.nodes.execute_todo_tool",
+        new=AsyncMock(return_value={"id": "t1", "title": "Idea system"}),
+    ) as execute_mock:
+        state = await todo_tools_agent(
+            {
+                "user_token": "token",
+                "actions": [
+                    {
+                        "intent": "create task with description",
+                        "tool_name": "create_task",
+                        "tool_arguments": {
+                            "organization_id": "4797da9c-f611-4bb8-b736-849a824c5fbc",
+                            "project_id": "11111111-1111-4111-8111-111111111111",
+                            "title": "Idea system",
+                        },
+                    }
+                ],
+                "latest_user_message": (
+                    "create a task Idea system and put a description as well for me"
+                ),
+                "used_tools": [],
+            },
+            runtime=MagicMock(),
+        )
+
+    assert state["tool_results"][0]["success"] is True
+    assert execute_mock.await_args.args[2]["description"] == "Creative description for the task."
+
+
+@pytest.mark.asyncio
+async def test_response_agent_uses_verified_mutation_response():
+    runtime = MagicMock()
+    with patch("app.graph.nodes.build_model") as build_model:
+        state = await response_agent(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "create a task with a description",
+                    }
+                ],
+                "latest_user_message": "create a task with a description",
+                "route": "tools",
+                "tool_results": [
+                    {
+                        "intent": "create task",
+                        "tool_name": "create_task",
+                        "tool_result": {"id": "t1", "title": "Idea system"},
+                        "error": None,
+                        "success": True,
+                        "partial": False,
+                    }
+                ],
+            },
+            runtime,
+        )
+
+    build_model.assert_not_called()
+    assert "Idea system" in state["response"]
+    assert "t1" in state["response"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_update_tasks_arguments_async_generates_single_task_description():
+    task_refs = [
+        {
+            "taskId": "t1",
+            "organizationId": "org1",
+            "projectId": "proj1",
+            "title": "copy and planning verification",
+        }
+    ]
+    runtime = MagicMock()
+
+    with patch(
+        "app.graph.nodes._generate_task_description_from_title",
+        new=AsyncMock(return_value="Verify copy and planning flows in the task system."),
+    ):
+        result = await resolve_update_tasks_arguments_async(
+            runtime,
+            arguments={"task_ids": None},
+            task_refs=task_refs,
+            latest_user_message="add a description please",
+        )
+
+    assert result["tasks"] == [
+        {
+            "organization_id": "org1",
+            "project_id": "proj1",
+            "task_id": "t1",
+            "description": "Verify copy and planning flows in the task system.",
+        }
+    ]
