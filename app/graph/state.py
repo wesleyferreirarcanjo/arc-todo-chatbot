@@ -40,3 +40,6 @@ class ChatGraphState(TypedDict, total=False):
     scope_status: Literal["resolved", "ambiguous", "not_found"]
     response: str
     error: str | None
+    rag_chunks: list[dict[str, Any]]
+    rag_context_text: str
+    rag_error: str | None

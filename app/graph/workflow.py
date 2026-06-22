@@ -4,14 +4,18 @@ import logging
 
 from langgraph.graph import END, START, StateGraph
 
+from app.arc_todo_client import ArcTodoApiError, ArcTodoClient
 from app.chatbot_settings import ChatbotRuntimeSettings
+from app.conversations import persist_conversation_turn, prepare_conversation_messages
 from app.errors import from_exception
 from app.graph.nodes import (
     context_agent,
     planner_agent,
     response_agent,
+    retrieval_agent,
     route_after_context,
     route_after_planner,
+    route_after_retrieval,
     route_after_scope_discovery,
     route_after_tools,
     scope_discovery_agent,
@@ -37,6 +41,7 @@ def build_chat_graph(runtime: ChatbotRuntimeSettings):
         return await todo_tools_agent(state, runtime)
 
     graph.add_node("context_agent", context_agent)
+    graph.add_node("retrieval_agent", retrieval_agent)
     graph.add_node("scope_discovery_agent", scope_discovery_agent)
     graph.add_node("planner_agent", planner_node)
     graph.add_node("todo_tools_agent", tools_node)
@@ -46,6 +51,13 @@ def build_chat_graph(runtime: ChatbotRuntimeSettings):
     graph.add_conditional_edges(
         "context_agent",
         route_after_context,
+        {
+            "retrieval_agent": "retrieval_agent",
+        },
+    )
+    graph.add_conditional_edges(
+        "retrieval_agent",
+        route_after_retrieval,
         {
             "scope_discovery_agent": "scope_discovery_agent",
             "planner_agent": "planner_agent",
@@ -117,7 +129,60 @@ def _build_initial_state(
         "conversation_id": conversation_id,
         "task_refs": task_refs or [],
         "used_tools": [],
+        "rag_chunks": [],
+        "rag_context_text": "",
+        "rag_error": None,
     }
+
+
+async def _run_workflow_with_persistence(
+    *,
+    runtime: ChatbotRuntimeSettings,
+    messages: list[dict[str, str]],
+    user_token: str,
+    organization_id: str | None,
+    project_id: str | None,
+    conversation_id: str | None,
+    task_refs: list[dict[str, str]] | None,
+) -> ChatGraphState:
+    client = ArcTodoClient(user_token=user_token)
+    prepared_messages, user_message_to_persist = await prepare_conversation_messages(
+        client,
+        conversation_id,
+        messages,
+    )
+    graph = build_chat_graph(runtime)
+    initial_state = _build_initial_state(
+        runtime=runtime,
+        messages=prepared_messages,
+        user_token=user_token,
+        organization_id=organization_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        task_refs=task_refs,
+    )
+    try:
+        result = await graph.ainvoke(initial_state)
+    except Exception as exc:
+        raise from_exception(exc, stage="workflow") from exc
+
+    if conversation_id:
+        try:
+            await persist_conversation_turn(
+                client,
+                conversation_id,
+                user_message=user_message_to_persist,
+                assistant_message=result.get("response") or "",
+                used_tools=result.get("used_tools", []),
+            )
+        except ArcTodoApiError as exc:
+            logger.warning(
+                "Failed to persist conversation %s: %s",
+                conversation_id,
+                exc,
+            )
+
+    return result
 
 
 async def run_chat_workflow(
@@ -130,8 +195,7 @@ async def run_chat_workflow(
     conversation_id: str | None = None,
     task_refs: list[dict[str, str]] | None = None,
 ) -> ChatGraphState:
-    graph = build_chat_graph(runtime)
-    initial_state = _build_initial_state(
+    return await _run_workflow_with_persistence(
         runtime=runtime,
         messages=messages,
         user_token=user_token,
@@ -140,10 +204,6 @@ async def run_chat_workflow(
         conversation_id=conversation_id,
         task_refs=task_refs,
     )
-    try:
-        return await graph.ainvoke(initial_state)
-    except Exception as exc:
-        raise from_exception(exc, stage="workflow") from exc
 
 
 async def run_chat_workflow_streaming(
@@ -157,10 +217,16 @@ async def run_chat_workflow_streaming(
     task_refs: list[dict[str, str]] | None = None,
     handler: StreamEventHandler,
 ) -> None:
+    client = ArcTodoClient(user_token=user_token)
+    prepared_messages, user_message_to_persist = await prepare_conversation_messages(
+        client,
+        conversation_id,
+        messages,
+    )
     graph = build_chat_graph(runtime)
     initial_state = _build_initial_state(
         runtime=runtime,
-        messages=messages,
+        messages=prepared_messages,
         user_token=user_token,
         organization_id=organization_id,
         project_id=project_id,
@@ -176,3 +242,19 @@ async def run_chat_workflow_streaming(
         raise workflow_error from exc
     finally:
         reset_stream_handler(token)
+
+    if conversation_id:
+        try:
+            await persist_conversation_turn(
+                client,
+                conversation_id,
+                user_message=user_message_to_persist,
+                assistant_message=result.get("response") or "",
+                used_tools=result.get("used_tools", []),
+            )
+        except ArcTodoApiError as exc:
+            logger.warning(
+                "Failed to persist conversation %s: %s",
+                conversation_id,
+                exc,
+            )

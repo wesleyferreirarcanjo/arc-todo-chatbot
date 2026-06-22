@@ -21,6 +21,9 @@ from app.graph.heuristics import _looks_like_create_mutation
 from app.graph.scope import _is_uuid, _needs_scope_retry
 
 def route_after_context(state: ChatGraphState) -> str:
+    return "retrieval_agent"
+
+def route_after_retrieval(state: ChatGraphState) -> str:
     if _looks_like_create_mutation(state.get("latest_user_message", "")):
         return "scope_discovery_agent"
     return "planner_agent"

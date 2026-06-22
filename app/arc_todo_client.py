@@ -103,6 +103,26 @@ class ArcTodoClient:
             return None
         return response.json()
 
+    async def get_conversation(self, conversation_id: str) -> Any:
+        return await self.request("GET", f"/conversations/{conversation_id}")
+
+    async def add_conversation_message(
+        self,
+        conversation_id: str,
+        *,
+        role: str,
+        content: str,
+        used_tools: list[str] | None = None,
+    ) -> Any:
+        body: dict[str, Any] = {"role": role, "content": content}
+        if used_tools:
+            body["usedTools"] = used_tools
+        return await self.request(
+            "POST",
+            f"/conversations/{conversation_id}/messages",
+            json_body=body,
+        )
+
     @staticmethod
     def format_result(data: Any) -> str:
         return json.dumps(data, indent=2, default=str)

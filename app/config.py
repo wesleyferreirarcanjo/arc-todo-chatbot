@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     http_max_connections: int = 20
     http_max_keepalive_connections: int = 10
     todo_tools_batch_concurrency: int = 5
+    rag_api_base_url: str = "http://localhost:8020"
+    rag_timeout_seconds: float = 30.0
+    rag_top_k: int = 5
+    rag_max_context_tokens: int = 4000
 
     @property
     def cors_origin_list(self) -> list[str]:

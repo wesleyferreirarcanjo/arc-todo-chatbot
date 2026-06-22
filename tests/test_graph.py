@@ -26,6 +26,7 @@ from app.graph.nodes import (
     resolve_update_tasks_arguments,
     resolve_update_tasks_arguments_async,
     route_after_context,
+    route_after_retrieval,
     route_after_planner,
     route_after_scope_discovery,
     route_after_tools,
@@ -910,11 +911,12 @@ async def test_planner_agent_confirmation_routes_to_update_tasks():
 
 
 def test_create_mutation_routes_through_scope_discovery():
-    assert route_after_context({"latest_user_message": "create a task in arc-todo project"}) == "scope_discovery_agent"
-    assert route_after_context(
+    assert route_after_context({"latest_user_message": "create a task in arc-todo project"}) == "retrieval_agent"
+    assert route_after_retrieval({"latest_user_message": "create a task in arc-todo project"}) == "scope_discovery_agent"
+    assert route_after_retrieval(
         {"latest_user_message": "add description for this task"}
     ) == "planner_agent"
-    assert route_after_context(
+    assert route_after_retrieval(
         {
             "latest_user_message": (
                 "make assistant smater and... repositories link connect... "
