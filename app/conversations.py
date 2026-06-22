@@ -14,6 +14,30 @@ def _normalize_api_message(message: dict[str, Any]) -> ChatMessageDict:
     return {"role": role, "content": str(message.get("content") or "")}
 
 
+def _strip_persisted_prefix(
+    persisted: list[ChatMessageDict],
+    incoming: list[ChatMessageDict],
+) -> list[ChatMessageDict]:
+    """Drop leading messages already stored when the client replays full history."""
+    if not persisted or not incoming:
+        return incoming
+
+    overlap = 0
+    for index, persisted_message in enumerate(persisted):
+        if index >= len(incoming):
+            break
+        incoming_message = incoming[index]
+        if (
+            persisted_message["role"] == incoming_message.get("role", "user")
+            and persisted_message["content"] == incoming_message.get("content", "")
+        ):
+            overlap = index + 1
+        else:
+            break
+
+    return incoming[overlap:]
+
+
 def merge_conversation_messages(
     persisted: list[ChatMessageDict],
     incoming: list[ChatMessageDict],
@@ -28,7 +52,7 @@ def merge_conversation_messages(
     merged = list(persisted)
     new_user_message: ChatMessageDict | None = None
 
-    for message in incoming:
+    for message in _strip_persisted_prefix(persisted, incoming):
         role = message.get("role", "user")
         content = message.get("content", "")
         if not content:

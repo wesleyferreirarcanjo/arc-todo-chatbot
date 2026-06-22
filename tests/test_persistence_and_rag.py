@@ -36,6 +36,23 @@ def test_merge_conversation_messages_skips_duplicate_user_message():
     assert new_user is None
 
 
+def test_merge_conversation_messages_strips_replayed_full_history():
+    persisted = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    incoming = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "list tasks"},
+    ]
+
+    merged, new_user = merge_conversation_messages(persisted, incoming)
+
+    assert merged == persisted + [{"role": "user", "content": "list tasks"}]
+    assert new_user == {"role": "user", "content": "list tasks"}
+
+
 @pytest.mark.asyncio
 async def test_prepare_conversation_messages_loads_persisted_history():
     client = MagicMock()
