@@ -29,13 +29,26 @@ def build_model(runtime: ChatbotRuntimeSettings) -> ChatOpenAI:
 
 def _extract_json(text: str) -> dict[str, Any]:
     text = text.strip()
+    if not text:
+        logger.warning("LLM returned empty JSON payload; falling back to direct route")
+        return {"route": "direct"}
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
-            raise
-        return json.loads(match.group(0))
+            logger.warning(
+                "LLM returned non-JSON payload; falling back to direct route: %r",
+                text[:200],
+            )
+            return {"route": "direct"}
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            logger.warning(
+                "LLM JSON fragment could not be parsed; falling back to direct route"
+            )
+            return {"route": "direct"}
 
 def _normalize_tool_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(arguments)

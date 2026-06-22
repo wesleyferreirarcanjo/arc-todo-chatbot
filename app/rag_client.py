@@ -40,6 +40,23 @@ class RagClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._user_token}"}
 
+    @staticmethod
+    def _parse_json(response: httpx.Response) -> dict[str, Any]:
+        text = response.text.strip()
+        if not text:
+            raise RagClientError(
+                f"RAG returned an empty response ({response.status_code})",
+                response.status_code,
+            )
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RagClientError(
+                f"RAG returned invalid JSON ({response.status_code})",
+                response.status_code,
+            ) from exc
+        return data if isinstance(data, dict) else {}
+
     async def retrieve(
         self,
         *,
@@ -77,14 +94,14 @@ class RagClient:
         if not response.is_success:
             message = f"RAG request failed ({response.status_code})"
             try:
-                data = response.json()
+                data = self._parse_json(response)
                 if isinstance(data.get("detail"), str):
                     message = data["detail"]
-            except Exception:
+            except RagClientError:
                 pass
             raise RagClientError(message, response.status_code)
 
-        data = response.json()
+        data = self._parse_json(response)
         return data if isinstance(data, dict) else {"chunks": []}
 
     async def trigger_index_sync(self) -> dict[str, Any]:
@@ -102,5 +119,5 @@ class RagClient:
                 f"RAG index sync failed ({response.status_code})",
                 response.status_code,
             )
-        data = response.json()
+        data = self._parse_json(response)
         return data if isinstance(data, dict) else {"queuedJobs": 0}
