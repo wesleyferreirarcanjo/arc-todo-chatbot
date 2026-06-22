@@ -3,12 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 from app.arc_todo_client import ArcTodoClient, ArcTodoApiError
+from app.concurrency import map_limited
+from app.config import settings
 from app.task_id_resolver import is_friendly_task_id, is_uuid
 
 
 class TodoTools:
     def __init__(self, client: ArcTodoClient) -> None:
         self._client = client
+        self._batch_concurrency = settings.todo_tools_batch_concurrency
 
     async def list_organizations(self) -> Any:
         return await self._client.request("GET", "/organizations")
@@ -125,11 +128,11 @@ class TodoTools:
     ) -> Any:
         created: list[Any] = []
         failed: list[dict[str, str]] = []
-        for task in tasks:
+
+        async def create_one(task: dict[str, Any]) -> tuple[Any | None, dict[str, str] | None]:
             title = task.get("title")
             if not title:
-                failed.append({"title": "", "error": "Missing title"})
-                continue
+                return None, {"title": "", "error": "Missing title"}
             try:
                 result = await self.create_task(
                     organization_id=organization_id,
@@ -141,9 +144,20 @@ class TodoTools:
                     due_date=task.get("due_date"),
                     parent_task_id=task.get("parent_task_id") or task.get("parent_id"),
                 )
-                created.append(result)
+                return result, None
             except Exception as exc:
-                failed.append({"title": title, "error": str(exc)})
+                return None, {"title": title, "error": str(exc)}
+
+        results = await map_limited(tasks, create_one, limit=self._batch_concurrency)
+        for outcome in results:
+            if isinstance(outcome, BaseException):
+                failed.append({"title": "", "error": str(outcome)})
+                continue
+            result, error = outcome
+            if error:
+                failed.append(error)
+            elif result is not None:
+                created.append(result)
         return {"created": created, "failed": failed}
 
     async def update_task(
@@ -227,7 +241,8 @@ class TodoTools:
     ) -> Any:
         deleted: list[str] = []
         failed: list[dict[str, str]] = []
-        for task in tasks:
+
+        async def delete_one(task: dict[str, str]) -> tuple[str | None, dict[str, str] | None]:
             task_id = task["task_id"]
             try:
                 await self.delete_task(
@@ -235,9 +250,20 @@ class TodoTools:
                     project_id=task["project_id"],
                     task_id=task_id,
                 )
-                deleted.append(task_id)
+                return task_id, None
             except Exception as exc:
-                failed.append({"task_id": task_id, "error": str(exc)})
+                return None, {"task_id": task_id, "error": str(exc)}
+
+        results = await map_limited(tasks, delete_one, limit=self._batch_concurrency)
+        for outcome in results:
+            if isinstance(outcome, BaseException):
+                failed.append({"task_id": "", "error": str(outcome)})
+                continue
+            task_id, error = outcome
+            if error:
+                failed.append(error)
+            elif task_id:
+                deleted.append(task_id)
         return {"deleted": deleted, "failed": failed}
 
     async def update_tasks(
@@ -249,7 +275,10 @@ class TodoTools:
         failed: list[dict[str, str]] = []
         results: list[dict[str, Any]] = []
         update_fields = ("title", "description", "status", "criticity", "due_date", "parent_task_id")
-        for task in tasks:
+
+        async def update_one(
+            task: dict[str, Any],
+        ) -> tuple[str | None, dict[str, Any] | None, dict[str, str] | None]:
             task_id = task["task_id"]
             try:
                 payload = {
@@ -263,10 +292,21 @@ class TodoTools:
                     task_id=task_id,
                     **payload,
                 )
-                updated.append(task_id)
-                results.append({"task_id": task_id, "result": result})
+                return task_id, {"task_id": task_id, "result": result}, None
             except Exception as exc:
-                failed.append({"task_id": task_id, "error": str(exc)})
+                return None, None, {"task_id": task_id, "error": str(exc)}
+
+        outcomes = await map_limited(tasks, update_one, limit=self._batch_concurrency)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                failed.append({"task_id": "", "error": str(outcome)})
+                continue
+            task_id, result_item, error = outcome
+            if error:
+                failed.append(error)
+            elif task_id and result_item:
+                updated.append(task_id)
+                results.append(result_item)
         return {"updated": updated, "results": results, "failed": failed}
 
     async def move_task(
@@ -317,7 +357,8 @@ class TodoTools:
         fetched: list[str] = []
         failed: list[dict[str, str]] = []
         results: list[Any] = []
-        for task in tasks:
+
+        async def get_one(task: dict[str, str]) -> tuple[str | None, Any | None, dict[str, str] | None]:
             task_id = task["task_id"]
             try:
                 result = await self.get_task(
@@ -325,10 +366,21 @@ class TodoTools:
                     project_id=task["project_id"],
                     task_id=task_id,
                 )
+                return task_id, result, None
+            except Exception as exc:
+                return None, None, {"task_id": task_id, "error": str(exc)}
+
+        outcomes = await map_limited(tasks, get_one, limit=self._batch_concurrency)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                failed.append({"task_id": "", "error": str(outcome)})
+                continue
+            task_id, result, error = outcome
+            if error:
+                failed.append(error)
+            elif task_id and result is not None:
                 fetched.append(task_id)
                 results.append(result)
-            except Exception as exc:
-                failed.append({"task_id": task_id, "error": str(exc)})
         return {"fetched": fetched, "tasks": results, "failed": failed}
 
 

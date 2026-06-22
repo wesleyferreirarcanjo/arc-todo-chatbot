@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from app.config import get_settings
+from app.http_pool import get_shared_http_client
 
 
 class ChatbotSettingsError(Exception):
@@ -22,6 +23,8 @@ class ChatbotRuntimeSettings:
         api_key: str,
         temperature: float,
         enabled: bool,
+        max_history_messages: int = 50,
+        max_history_tokens: int = 100_000,
     ) -> None:
         self.provider = provider
         self.base_url = base_url
@@ -29,6 +32,8 @@ class ChatbotRuntimeSettings:
         self.api_key = api_key
         self.temperature = temperature
         self.enabled = enabled
+        self.max_history_messages = max_history_messages
+        self.max_history_tokens = max_history_tokens
 
 
 class ChatbotSettingsClient:
@@ -44,17 +49,17 @@ class ChatbotSettingsClient:
             return {"Authorization": f"Bearer {settings.arc_todo_access_token}"}
 
         if settings.arc_todo_username and settings.arc_todo_password:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{base_url}/auth/login",
-                    json={
-                        "username": settings.arc_todo_username,
-                        "password": settings.arc_todo_password,
-                    },
-                )
-                response.raise_for_status()
-                token = response.json()["access_token"]
-                return {"Authorization": f"Bearer {token}"}
+            client = get_shared_http_client()
+            response = await client.post(
+                f"{base_url}/auth/login",
+                json={
+                    "username": settings.arc_todo_username,
+                    "password": settings.arc_todo_password,
+                },
+            )
+            response.raise_for_status()
+            token = response.json()["access_token"]
+            return {"Authorization": f"Bearer {token}"}
 
         raise ChatbotSettingsError(
             "Cannot load chatbot settings without ARC_TODO_ACCESS_TOKEN or "
@@ -73,6 +78,8 @@ class ChatbotSettingsClient:
             api_key=api_key,
             temperature=float(payload.get("temperature", 0.2)),
             enabled=bool(payload.get("enabled", False)),
+            max_history_messages=int(payload.get("maxHistoryMessages", 50)),
+            max_history_tokens=int(payload.get("maxHistoryTokens", 100_000)),
         )
 
     async def get_runtime_settings(self, *, force_refresh: bool = False) -> ChatbotRuntimeSettings:
@@ -88,16 +95,16 @@ class ChatbotSettingsClient:
         headers = await self._service_headers()
         base_url = settings.arc_todo_api_base_url.rstrip("/")
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"{base_url}/chatbot-settings/runtime",
-                headers=headers,
+        client = get_shared_http_client()
+        response = await client.get(
+            f"{base_url}/chatbot-settings/runtime",
+            headers=headers,
+        )
+        if not response.is_success:
+            raise ChatbotSettingsError(
+                f"Failed to load chatbot settings ({response.status_code})"
             )
-            if not response.is_success:
-                raise ChatbotSettingsError(
-                    f"Failed to load chatbot settings ({response.status_code})"
-                )
-            runtime = self._parse_runtime_settings(response.json())
+        runtime = self._parse_runtime_settings(response.json())
 
         self._cache = runtime
         self._cache_expires_at = now + settings.chatbot_settings_cache_seconds

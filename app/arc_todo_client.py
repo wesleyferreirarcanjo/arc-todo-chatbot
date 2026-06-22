@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from app.config import get_settings
+from app.http_pool import get_shared_http_client
 
 
 class ArcTodoApiError(Exception):
@@ -15,7 +16,12 @@ class ArcTodoApiError(Exception):
 
 
 class ArcTodoClient:
-    def __init__(self, user_token: str | None = None) -> None:
+    def __init__(
+        self,
+        user_token: str | None = None,
+        *,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
         settings = get_settings()
         self._base_url = settings.arc_todo_api_base_url.rstrip("/")
         self._service_token = settings.arc_todo_access_token
@@ -23,6 +29,7 @@ class ArcTodoClient:
         self._password = settings.arc_todo_password
         self._user_token = user_token
         self._cached_service_token: str | None = None
+        self._http_client = http_client
 
     async def _ensure_service_token(self, client: httpx.AsyncClient) -> None:
         if self._cached_service_token:
@@ -64,6 +71,11 @@ class ArcTodoClient:
             pass
         raise ArcTodoApiError(message, response.status_code)
 
+    def _client(self) -> httpx.AsyncClient:
+        if self._http_client is not None:
+            return self._http_client
+        return get_shared_http_client()
+
     async def request(
         self,
         method: str,
@@ -73,23 +85,23 @@ class ArcTodoClient:
         json_body: dict[str, Any] | None = None,
         use_service_token: bool = False,
     ) -> Any:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            if use_service_token:
-                await self._ensure_service_token(client)
-            response = await client.request(
-                method,
-                f"{self._base_url}{path}",
-                params=params,
-                json=json_body,
-                headers=self._auth_headers(use_service_token=use_service_token),
-            )
-            if not response.is_success:
-                await self._raise_api_error(response)
-            if response.status_code == 204:
-                return None
-            if not response.content:
-                return None
-            return response.json()
+        client = self._client()
+        if use_service_token:
+            await self._ensure_service_token(client)
+        response = await client.request(
+            method,
+            f"{self._base_url}{path}",
+            params=params,
+            json=json_body,
+            headers=self._auth_headers(use_service_token=use_service_token),
+        )
+        if not response.is_success:
+            await self._raise_api_error(response)
+        if response.status_code == 204:
+            return None
+        if not response.content:
+            return None
+        return response.json()
 
     @staticmethod
     def format_result(data: Any) -> str:

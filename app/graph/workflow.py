@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from langgraph.graph import END, START, StateGraph
 
 from app.chatbot_settings import ChatbotRuntimeSettings
+from app.errors import from_exception
 from app.graph.nodes import (
     context_agent,
     planner_agent,
@@ -15,6 +18,10 @@ from app.graph.nodes import (
     todo_tools_agent,
 )
 from app.graph.state import ChatGraphState
+from app.history import trim_messages
+from app.streaming import StreamEventHandler, bind_stream_handler, reset_stream_handler
+
+logger = logging.getLogger(__name__)
 
 
 def build_chat_graph(runtime: ChatbotRuntimeSettings):
@@ -74,6 +81,45 @@ def build_chat_graph(runtime: ChatbotRuntimeSettings):
     return graph.compile()
 
 
+def _prepare_messages(
+    messages: list[dict[str, str]],
+    runtime: ChatbotRuntimeSettings,
+) -> list[dict[str, str]]:
+    trimmed = trim_messages(
+        messages,
+        max_messages=runtime.max_history_messages,
+        max_tokens=runtime.max_history_tokens,
+    )
+    if len(trimmed) != len(messages):
+        logger.info(
+            "Trimmed conversation history from %s to %s messages",
+            len(messages),
+            len(trimmed),
+        )
+    return trimmed
+
+
+def _build_initial_state(
+    *,
+    runtime: ChatbotRuntimeSettings,
+    messages: list[dict[str, str]],
+    user_token: str,
+    organization_id: str | None,
+    project_id: str | None,
+    conversation_id: str | None,
+    task_refs: list[dict[str, str]] | None,
+) -> ChatGraphState:
+    return {
+        "messages": _prepare_messages(messages, runtime),
+        "user_token": user_token,
+        "organization_id": organization_id,
+        "project_id": project_id,
+        "conversation_id": conversation_id,
+        "task_refs": task_refs or [],
+        "used_tools": [],
+    }
+
+
 async def run_chat_workflow(
     *,
     runtime: ChatbotRuntimeSettings,
@@ -85,13 +131,48 @@ async def run_chat_workflow(
     task_refs: list[dict[str, str]] | None = None,
 ) -> ChatGraphState:
     graph = build_chat_graph(runtime)
-    initial_state: ChatGraphState = {
-        "messages": messages,
-        "user_token": user_token,
-        "organization_id": organization_id,
-        "project_id": project_id,
-        "conversation_id": conversation_id,
-        "task_refs": task_refs or [],
-        "used_tools": [],
-    }
-    return await graph.ainvoke(initial_state)
+    initial_state = _build_initial_state(
+        runtime=runtime,
+        messages=messages,
+        user_token=user_token,
+        organization_id=organization_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        task_refs=task_refs,
+    )
+    try:
+        return await graph.ainvoke(initial_state)
+    except Exception as exc:
+        raise from_exception(exc, stage="workflow") from exc
+
+
+async def run_chat_workflow_streaming(
+    *,
+    runtime: ChatbotRuntimeSettings,
+    messages: list[dict[str, str]],
+    user_token: str,
+    organization_id: str | None,
+    project_id: str | None,
+    conversation_id: str | None = None,
+    task_refs: list[dict[str, str]] | None = None,
+    handler: StreamEventHandler,
+) -> None:
+    graph = build_chat_graph(runtime)
+    initial_state = _build_initial_state(
+        runtime=runtime,
+        messages=messages,
+        user_token=user_token,
+        organization_id=organization_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        task_refs=task_refs,
+    )
+    token = bind_stream_handler(handler)
+    try:
+        result = await graph.ainvoke(initial_state)
+    except Exception as exc:
+        workflow_error = from_exception(exc, stage="workflow")
+        await handler.emit_error(workflow_error.message, code=workflow_error.code)
+        raise workflow_error from exc
+    finally:
+        reset_stream_handler(token)

@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     arc_todo_access_token: str | None = None
     cors_origins: str = "http://localhost:5173"
     chatbot_settings_cache_seconds: int = 60
+    http_timeout_seconds: float = 60.0
+    http_max_connections: int = 20
+    http_max_keepalive_connections: int = 10
+    todo_tools_batch_concurrency: int = 5
 
     @property
     def cors_origin_list(self) -> list[str]:
