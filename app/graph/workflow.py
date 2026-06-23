@@ -132,6 +132,9 @@ def _build_initial_state(
         "rag_chunks": [],
         "rag_context_text": "",
         "rag_error": None,
+        "rag_search_query": None,
+        "rag_token_usage": None,
+        "rag_index_status": None,
     }
 
 

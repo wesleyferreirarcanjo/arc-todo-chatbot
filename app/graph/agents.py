@@ -109,18 +109,22 @@ async def context_agent(state: ChatGraphState) -> ChatGraphState:
 
 async def retrieval_agent(state: ChatGraphState) -> ChatGraphState:
     from app.graph import nodes
-    from app.graph.rag_context import build_rag_context_text
+    from app.graph.rag_context import build_rag_context_text, build_retrieval_query
     from app.rag_client import RagClient, RagClientError
 
-    question = state.get("latest_user_message", "").strip()
-    if not question:
+    latest = state.get("latest_user_message", "").strip()
+    if not latest:
         return {
             **state,
             "rag_chunks": [],
             "rag_context_text": "",
             "rag_error": None,
+            "rag_search_query": None,
+            "rag_token_usage": None,
+            "rag_index_status": None,
         }
 
+    question = build_retrieval_query(state.get("messages", []), latest)
     rag_client = RagClient(user_token=state["user_token"])
     try:
         result = await rag_client.retrieve(
@@ -130,17 +134,30 @@ async def retrieval_agent(state: ChatGraphState) -> ChatGraphState:
         )
         chunks = result.get("chunks") or []
         rag_error = None
+        rag_search_query = result.get("searchQuery")
+        rag_token_usage = result.get("tokenUsage")
+        rag_index_status = result.get("indexStatus")
     except RagClientError as exc:
         chunks = []
         rag_error = str(exc)
+        rag_search_query = None
+        rag_token_usage = None
+        rag_index_status = None
         logger.warning("RAG retrieval failed: %s", rag_error)
 
-    rag_context_text = build_rag_context_text(chunks, rag_error=rag_error)
+    rag_context_text = build_rag_context_text(
+        chunks,
+        rag_error=rag_error,
+        index_status=rag_index_status,
+    )
     return {
         **state,
         "rag_chunks": chunks,
         "rag_context_text": rag_context_text,
         "rag_error": rag_error,
+        "rag_search_query": rag_search_query,
+        "rag_token_usage": rag_token_usage,
+        "rag_index_status": rag_index_status,
     }
 
 async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) -> ChatGraphState:
@@ -183,10 +200,18 @@ async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) 
     if state.get("rag_context_text"):
         prompt += "\n\n" + state["rag_context_text"]
 
+    planner_messages = trim_messages(messages, max_messages=6, max_tokens=2000)
+    from app.graph.rag_context import format_recent_conversation
+
+    conversation_text = format_recent_conversation(planner_messages)
+    human_content = latest_user_message
+    if conversation_text and conversation_text.strip() != f"User: {latest_user_message}".strip():
+        human_content = f"Recent conversation:\n{conversation_text}\n\nLatest message:\n{latest_user_message}"
+
     result = await model.ainvoke(
         [
             SystemMessage(content=prompt),
-            HumanMessage(content=state.get("latest_user_message", "")),
+            HumanMessage(content=human_content),
         ]
     )
     payload = _extract_json(str(result.content))

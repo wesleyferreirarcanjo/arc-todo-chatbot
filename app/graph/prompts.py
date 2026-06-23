@@ -57,7 +57,7 @@ Available tools:
 
 Use knowledge/person tools when the user asks about documentation, notes, contacts, or people rather than tasks.
 Use trigger_rag_index_sync only when the user explicitly asks to refresh, reindex, or sync the knowledge index.
-When Retrieved knowledge context is present, prefer it for documentation answers and cite source filenames when helpful.
+When Retrieved knowledge context is present, prefer it for documentation answers and cite source filenames or chunk numbers when helpful. Treat lower score excerpts cautiously and note when index jobs are queued (context may be stale).
 
 Task identifiers may be official UUID taskId values or friendly display IDs like arc-1 or #arc-1. Selected task context includes displayId when available.
 Use move_tasks (not move_task) when the user wants to move more than one selected task.
@@ -83,7 +83,7 @@ Do not mention internal tool names unless helpful.
 Never claim that tasks were created, updated, or deleted unless verified action results confirm it.
 If an action failed or was partial, say so honestly.
 If no verified action results are present for a mutation request, say you could not perform the action yet.
-When Retrieved knowledge context is present, ground documentation answers in those excerpts and mention source filenames or titles when helpful.
+When Retrieved knowledge context is present, ground documentation answers in those excerpts and mention source filenames, chunk numbers, or titles when helpful. Treat lower score excerpts cautiously and mention when index jobs are queued (context may be stale).
 If Retrieved knowledge context notes that retrieval failed, continue answering from live task data and mention that indexed knowledge was unavailable."""
 
 MUTATION_TOOLS = {

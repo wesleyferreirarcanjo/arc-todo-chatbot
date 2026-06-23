@@ -161,15 +161,22 @@ async def test_retrieval_agent_injects_chunks_and_fails_soft():
                     {
                         "title": "Setup",
                         "sourceFilename": "setup.md",
+                        "scope": "project",
+                        "chunkIndex": 0,
+                        "score": 0.91,
                         "text": "Install dependencies first.",
                     }
-                ]
+                ],
+                "searchQuery": "how do I install?",
+                "tokenUsage": {"totalTokens": 42},
+                "indexStatus": {"queuedJobs": 0, "totalChunks": 10},
             }
         )
         state = await retrieval_agent(
             {
                 "user_token": "token",
                 "latest_user_message": "how do I install?",
+                "messages": [{"role": "user", "content": "how do I install?"}],
                 "organization_id": "org-1",
                 "project_id": "proj-1",
             }
@@ -177,9 +184,35 @@ async def test_retrieval_agent_injects_chunks_and_fails_soft():
 
     assert len(state["rag_chunks"]) == 1
     assert "Install dependencies first." in state["rag_context_text"]
+    assert "scope=project" in state["rag_context_text"]
+    assert state["rag_search_query"] == "how do I install?"
+    assert state["rag_token_usage"]["totalTokens"] == 42
+    assert state["rag_index_status"]["totalChunks"] == 10
     assert state["rag_error"] is None
     assert route_after_context({}) == "retrieval_agent"
     assert route_after_retrieval({"latest_user_message": "hello"}) == "planner_agent"
+
+
+@pytest.mark.asyncio
+async def test_retrieval_agent_builds_follow_up_query():
+    from app.graph.agents import retrieval_agent
+
+    with patch("app.rag_client.RagClient") as rag_cls:
+        rag_cls.return_value.retrieve = AsyncMock(return_value={"chunks": []})
+        await retrieval_agent(
+            {
+                "user_token": "token",
+                "latest_user_message": "What about step 2?",
+                "messages": [
+                    {"role": "user", "content": "Explain deployment steps"},
+                    {"role": "assistant", "content": "Step 1 is setup."},
+                    {"role": "user", "content": "What about step 2?"},
+                ],
+            }
+        )
+        question = rag_cls.return_value.retrieve.await_args.kwargs["question"]
+        assert "Explain deployment steps" in question
+        assert question.endswith("What about step 2?")
 
 
 @pytest.mark.asyncio

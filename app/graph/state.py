@@ -43,3 +43,6 @@ class ChatGraphState(TypedDict, total=False):
     rag_chunks: list[dict[str, Any]]
     rag_context_text: str
     rag_error: str | None
+    rag_search_query: str | None
+    rag_token_usage: dict[str, Any] | None
+    rag_index_status: dict[str, Any] | None
