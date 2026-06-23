@@ -75,6 +75,7 @@ class TodoTools:
         project_id: str | None = None,
         status: str | None = None,
         criticity: str | None = None,
+        category: str | None = None,
         parent_task_id: str | None = None,
     ) -> Any:
         params: dict[str, str] = {}
@@ -86,6 +87,8 @@ class TodoTools:
             params["status"] = status
         if criticity:
             params["criticity"] = criticity
+        if category:
+            params["category"] = category
         if parent_task_id:
             params["parentTaskId"] = await self._resolve_parent_task_id(parent_task_id)
         return await self._client.request("GET", "/tasks", params=params or None)
@@ -101,11 +104,14 @@ class TodoTools:
         criticity: str = "medium",
         due_date: str | None = None,
         parent_task_id: str | None = None,
+        category: str = "other",
+        metadata: dict[str, Any] | None = None,
     ) -> Any:
         body: dict[str, Any] = {
             "title": title,
             "status": status,
             "criticity": criticity,
+            "category": category,
         }
         if description:
             body["description"] = description
@@ -113,6 +119,8 @@ class TodoTools:
             body["dueDate"] = due_date
         if parent_task_id:
             body["parentTaskId"] = await self._resolve_parent_task_id(parent_task_id)
+        if metadata is not None:
+            body["metadata"] = metadata
         return await self._client.request(
             "POST",
             f"/organizations/{organization_id}/projects/{project_id}/tasks",
@@ -143,6 +151,8 @@ class TodoTools:
                     criticity=task.get("criticity") or "medium",
                     due_date=task.get("due_date"),
                     parent_task_id=task.get("parent_task_id") or task.get("parent_id"),
+                    category=task.get("category") or "other",
+                    metadata=task.get("metadata"),
                 )
                 return result, None
             except Exception as exc:
@@ -173,6 +183,8 @@ class TodoTools:
         due_date: str | None = None,
         new_project_id: str | None = None,
         parent_task_id: str | None = None,
+        category: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Any:
         body: dict[str, Any] = {}
         if title is not None:
@@ -189,6 +201,10 @@ class TodoTools:
             body["projectId"] = new_project_id
         if parent_task_id is not None:
             body["parentTaskId"] = await self._resolve_parent_task_id(parent_task_id)
+        if category is not None:
+            body["category"] = category
+        if metadata is not None:
+            body["metadata"] = metadata
         organization_id, project_id, task_id = await self._resolve_task_scope(
             organization_id=organization_id,
             project_id=project_id,
@@ -274,7 +290,16 @@ class TodoTools:
         updated: list[str] = []
         failed: list[dict[str, str]] = []
         results: list[dict[str, Any]] = []
-        update_fields = ("title", "description", "status", "criticity", "due_date", "parent_task_id")
+        update_fields = (
+            "title",
+            "description",
+            "status",
+            "criticity",
+            "due_date",
+            "parent_task_id",
+            "category",
+            "metadata",
+        )
 
         async def update_one(
             task: dict[str, Any],
@@ -406,6 +431,7 @@ async def execute_todo_tool(
                 project_id=arguments.get("project_id"),
                 status=arguments.get("status"),
                 criticity=arguments.get("criticity"),
+                category=arguments.get("category"),
                 parent_task_id=arguments.get("parent_task_id")
                 or arguments.get("parent_id"),
             )

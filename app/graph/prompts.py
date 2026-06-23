@@ -36,13 +36,13 @@ Example: create a task and mark another selected task done -> two actions: creat
 Available tools:
 - list_organizations {}
 - list_projects {"organization_id": string}
-- list_tasks {"organization_id": string|null, "project_id": string|null, "status": string|null, "criticity": string|null, "parent_task_id": string|null}
+- list_tasks {"organization_id": string|null, "project_id": string|null, "status": string|null, "criticity": string|null, "category": string|null, "parent_task_id": string|null}
 - get_task {"organization_id": string, "project_id": string, "task_id": string}
 - get_tasks {"task_ids": string[]|null} — fetch multiple selected tasks; omit task_ids to use all taskIds from Selected task context
-- create_task {"organization_id": string|null, "project_id": string|null, "title": string, "description": string|null, "status": "todo"|"in_progress"|"done", "criticity": "low"|"medium"|"high"|"critical", "due_date": string|null, "parent_task_id": string|null}
-- create_tasks {"organization_id": string|null, "project_id": string|null, "tasks": [{"title": string, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null}]} — create multiple tasks in one request
-- update_task {"organization_id": string, "project_id": string, "task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null}
-- update_tasks {"task_ids": string[]|null, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "tasks": [{"task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null}]|null} — for multiple selected tasks, prefer a tasks array with one entry per task_id when values differ (especially descriptions); shared fields may apply to all only when every task should get the same value
+- create_task {"organization_id": string|null, "project_id": string|null, "title": string, "description": string|null, "status": "todo"|"in_progress"|"done", "criticity": "low"|"medium"|"high"|"critical", "due_date": string|null, "parent_task_id": string|null, "category": "coding"|"meeting"|"design"|"marketing"|"other", "metadata": object|null}
+- create_tasks {"organization_id": string|null, "project_id": string|null, "tasks": [{"title": string, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null}]} — create multiple tasks in one request
+- update_task {"organization_id": string, "project_id": string, "task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null}
+- update_tasks {"task_ids": string[]|null, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null, "tasks": [{"task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null}]|null} — for multiple selected tasks, prefer a tasks array with one entry per task_id when values differ (especially descriptions); shared fields may apply to all only when every task should get the same value
 - move_task {"task_id": string, "target_project_id": string|null, "target_project_hint": string|null} — move one selected task to another project; use organization_id/project_id from Selected task context for the task's current location
 - move_tasks {"task_ids": string[]|null, "target_project_id": string|null, "target_project_hint": string|null} — move multiple selected tasks to another project
 - delete_task {"organization_id": string, "project_id": string, "task_id": string}
@@ -71,6 +71,7 @@ When the user asks to add a subtask under a selected parent task, use create_tas
 When the user asks to create a parent with subtasks, use create_task for the parent first, then create_tasks with the same parent_task_id from the created parent id.
 When the user asks to make one task a subtask of another, use update_task on the child with parent_task_id set to the parent task id.
 When two tasks are selected and the user wants hierarchy, treat the parent as the task they call "parent"/"under"/"of", and the child as the task to attach.
+When the user asks to create a coding task with repo/branch/PR/deploy links, use create_task with category "coding" and metadata keys repositoryUrl, branch, commits, pullRequestUrl, deploymentUrl, implementationNotes.
 Use update_task with parent_task_id null to detach a subtask from its parent.
 Use route "direct" for greetings, general help, or when no API action is needed.
 Ask the user a clarifying question only when organization/project scope, destructive intent, or target task identity is genuinely ambiguous.
@@ -97,7 +98,16 @@ MUTATION_TOOLS = {
     "delete_tasks",
 }
 
-UPDATE_TASK_FIELDS = ("title", "description", "status", "criticity", "due_date", "parent_task_id")
+UPDATE_TASK_FIELDS = (
+    "title",
+    "description",
+    "status",
+    "criticity",
+    "due_date",
+    "parent_task_id",
+    "category",
+    "metadata",
+)
 
 PLANNER_MUTATION_RETRY = (
     "\nIMPORTANT: The user is asking to create, update, or delete tasks. "

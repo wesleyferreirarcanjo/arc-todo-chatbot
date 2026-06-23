@@ -43,11 +43,15 @@ def _format_task_context_line(task: dict[str, Any], fallback_title: str) -> str:
         f"  title: {title}",
         f"  status: {status}",
         f"  criticity: {criticity}",
+        f"  category: {task.get('category') or 'other'}",
         f"  organizationId: {organization_id}",
         f"  projectId: {project_id}",
         f"  dueDate: {due_date}",
         f"  description: {description}",
     ])
+    metadata = task.get("metadata")
+    if isinstance(metadata, dict) and metadata:
+        lines.append(f"  metadata: {json.dumps(metadata, ensure_ascii=True)}")
     if parent_task_id:
         lines.append(f"  parentTaskId: {parent_task_id}")
     if isinstance(subtask_progress, dict) and subtask_progress.get("total"):

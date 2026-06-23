@@ -427,7 +427,12 @@ async def test_create_tasks_tool_calls_create_task_for_each():
     client.request.assert_any_await(
         "POST",
         "/organizations/org1/projects/proj1/tasks",
-        json_body={"title": "RAG system", "status": "todo", "criticity": "medium"},
+        json_body={
+            "title": "RAG system",
+            "status": "todo",
+            "criticity": "medium",
+            "category": "other",
+        },
     )
 
 
