@@ -216,6 +216,35 @@ async def test_retrieval_agent_builds_follow_up_query():
 
 
 @pytest.mark.asyncio
+async def test_retrieval_agent_forwards_task_context_to_rag():
+    from app.graph.agents import retrieval_agent
+
+    task_context = (
+        "Selected task context:\n"
+        "- taskId: uuid-1\n"
+        "  displayId: #arc-106\n"
+        "  title: Improve RAG integration\n"
+        "  status: in_progress\n"
+        "  description: Connect tasks with knowledge search."
+    )
+    with patch("app.rag_client.RagClient") as rag_cls:
+        rag_cls.return_value.retrieve = AsyncMock(return_value={"chunks": []})
+        await retrieval_agent(
+            {
+                "user_token": "token",
+                "latest_user_message": "How should I verify this?",
+                "messages": [{"role": "user", "content": "How should I verify this?"}],
+                "task_context_text": task_context,
+            }
+        )
+        question = rag_cls.return_value.retrieve.await_args.kwargs["question"]
+        assert "How should I verify this?" in question
+        assert "#arc-106" in question
+        assert "Improve RAG integration" in question
+        assert "taskId" not in question
+
+
+@pytest.mark.asyncio
 async def test_retrieval_agent_handles_rag_failure():
     from app.graph.agents import retrieval_agent
     from app.rag_client import RagClientError

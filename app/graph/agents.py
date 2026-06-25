@@ -124,7 +124,11 @@ async def retrieval_agent(state: ChatGraphState) -> ChatGraphState:
             "rag_index_status": None,
         }
 
-    question = build_retrieval_query(state.get("messages", []), latest)
+    question = build_retrieval_query(
+        state.get("messages", []),
+        latest,
+        task_context_text=state.get("task_context_text"),
+    )
     rag_client = RagClient(user_token=state["user_token"])
     try:
         result = await rag_client.retrieve(
