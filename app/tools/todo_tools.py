@@ -100,6 +100,9 @@ class TodoTools:
         project_id: str,
         title: str,
         description: str | None = None,
+        business_description: str | None = None,
+        plan_code_description: str | None = None,
+        test_description: str | None = None,
         status: str = "todo",
         criticity: str = "medium",
         due_date: str | None = None,
@@ -115,6 +118,12 @@ class TodoTools:
         }
         if description:
             body["description"] = description
+        if business_description is not None:
+            body["businessDescription"] = business_description
+        if plan_code_description is not None:
+            body["planCodeDescription"] = plan_code_description
+        if test_description is not None:
+            body["testDescription"] = test_description
         if due_date:
             body["dueDate"] = due_date
         if parent_task_id:
@@ -147,6 +156,12 @@ class TodoTools:
                     project_id=project_id,
                     title=title,
                     description=task.get("description"),
+                    business_description=task.get("business_description")
+                    or task.get("businessDescription"),
+                    plan_code_description=task.get("plan_code_description")
+                    or task.get("planCodeDescription"),
+                    test_description=task.get("test_description")
+                    or task.get("testDescription"),
                     status=task.get("status") or "todo",
                     criticity=task.get("criticity") or "medium",
                     due_date=task.get("due_date"),
@@ -178,6 +193,9 @@ class TodoTools:
         task_id: str,
         title: str | None = None,
         description: str | None = None,
+        business_description: str | None = None,
+        plan_code_description: str | None = None,
+        test_description: str | None = None,
         status: str | None = None,
         criticity: str | None = None,
         due_date: str | None = None,
@@ -191,6 +209,12 @@ class TodoTools:
             body["title"] = title
         if description is not None:
             body["description"] = description
+        if business_description is not None:
+            body["businessDescription"] = business_description
+        if plan_code_description is not None:
+            body["planCodeDescription"] = plan_code_description
+        if test_description is not None:
+            body["testDescription"] = test_description
         if status is not None:
             body["status"] = status
         if criticity is not None:

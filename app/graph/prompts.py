@@ -39,10 +39,10 @@ Available tools:
 - list_tasks {"organization_id": string|null, "project_id": string|null, "status": string|null, "criticity": string|null, "category": string|null, "parent_task_id": string|null}
 - get_task {"organization_id": string, "project_id": string, "task_id": string}
 - get_tasks {"task_ids": string[]|null} — fetch multiple selected tasks; omit task_ids to use all taskIds from Selected task context
-- create_task {"organization_id": string|null, "project_id": string|null, "title": string, "description": string|null, "status": "todo"|"in_progress"|"done", "criticity": "low"|"medium"|"high"|"critical", "due_date": string|null, "parent_task_id": string|null, "category": "coding"|"meeting"|"design"|"marketing"|"other", "metadata": object|null}
-- create_tasks {"organization_id": string|null, "project_id": string|null, "tasks": [{"title": string, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null}]} — create multiple tasks in one request
-- update_task {"organization_id": string, "project_id": string, "task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null}
-- update_tasks {"task_ids": string[]|null, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null, "tasks": [{"task_id": string, "title": string|null, "description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null}]|null} — for multiple selected tasks, prefer a tasks array with one entry per task_id when values differ (especially descriptions); shared fields may apply to all only when every task should get the same value
+- create_task {"organization_id": string|null, "project_id": string|null, "title": string, "description": string|null, "business_description": string|null, "plan_code_description": string|null, "test_description": string|null, "status": "todo"|"in_progress"|"dev_test"|"qa_test"|"done", "criticity": "low"|"medium"|"high"|"critical", "due_date": string|null, "parent_task_id": string|null, "category": "coding"|"meeting"|"design"|"marketing"|"other", "metadata": object|null}
+- create_tasks {"organization_id": string|null, "project_id": string|null, "tasks": [{"title": string, "description": string|null, "business_description": string|null, "plan_code_description": string|null, "test_description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null}]} — create multiple tasks in one request
+- update_task {"organization_id": string, "project_id": string, "task_id": string, "title": string|null, "description": string|null, "business_description": string|null, "plan_code_description": string|null, "test_description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null}
+- update_tasks {"task_ids": string[]|null, "title": string|null, "description": string|null, "business_description": string|null, "plan_code_description": string|null, "test_description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null, "tasks": [{"task_id": string, "title": string|null, "description": string|null, "business_description": string|null, "plan_code_description": string|null, "test_description": string|null, "status": string|null, "criticity": string|null, "due_date": string|null, "parent_task_id": string|null, "category": string|null, "metadata": object|null}]|null} — for multiple selected tasks, prefer a tasks array with one entry per task_id when values differ (especially descriptions); shared fields may apply to all only when every task should get the same value
 - move_task {"task_id": string, "target_project_id": string|null, "target_project_hint": string|null} — move one selected task to another project; use organization_id/project_id from Selected task context for the task's current location
 - move_tasks {"task_ids": string[]|null, "target_project_id": string|null, "target_project_hint": string|null} — move multiple selected tasks to another project
 - delete_task {"organization_id": string, "project_id": string, "task_id": string}
@@ -65,6 +65,8 @@ When Selected task context is present, keep the task in its current organization
 When Selected task context lists multiple tasks and the user asks to add or create descriptions, return update_tasks with a tasks array containing a distinct description for each task_id based on that task's title.
 When the user asks to fix, change, or rewrite descriptions for selected tasks, call update_tasks immediately with appropriate per-task descriptions; do not ask for confirmation first.
 When the user asks for a description (including creative or matching descriptions) and none is provided, infer a reasonable description from the task title and request — do not ask the user to supply it.
+Tasks may store three description purposes: business_description (why/scope), plan_code_description (how to implement), and test_description (how to verify). Legacy description maps to business_description.
+Board statuses are todo, in_progress, dev_test, qa_test, and done. After implementation work is complete, prefer moving coding tasks to dev_test rather than done unless the user explicitly skips test stages.
 Use create_tasks (not create_task) when the user asks to create more than one task in the same project.
 Tasks support one parent level: a parent task may have direct subtasks via parent_task_id. Subtasks cannot have subtasks.
 When the user asks to add a subtask under a selected parent task, use create_task with parent_task_id from Selected task context.
@@ -101,6 +103,9 @@ MUTATION_TOOLS = {
 UPDATE_TASK_FIELDS = (
     "title",
     "description",
+    "business_description",
+    "plan_code_description",
+    "test_description",
     "status",
     "criticity",
     "due_date",
