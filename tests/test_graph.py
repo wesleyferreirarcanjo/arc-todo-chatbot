@@ -79,6 +79,30 @@ def test_route_after_planner_direct():
     assert route_after_planner({"route": "direct"}) == "response_agent"
 
 
+def test_resolve_bug_flag_arguments_uses_selected_task():
+    from app.graph.heuristics import _resolve_bug_flag_arguments
+
+    result = _resolve_bug_flag_arguments(
+        "mark #arc-118 as bug",
+        [
+            {
+                "taskId": "t1",
+                "organizationId": "org1",
+                "projectId": "proj1",
+                "displayId": "#arc-118",
+                "title": "QA task",
+            },
+        ],
+    )
+
+    assert result == {
+        "organization_id": "org1",
+        "project_id": "proj1",
+        "task_id": "t1",
+        "is_bug": True,
+    }
+
+
 def test_resolve_delete_tasks_arguments_uses_all_refs_for_bulk_intent():
     task_refs = [
         {

@@ -42,6 +42,7 @@ def _format_task_context_line(task: dict[str, Any], fallback_title: str) -> str:
     lines.extend([
         f"  title: {title}",
         f"  status: {status}",
+        f"  isBug: {bool(task.get('isBug') or task.get('is_bug'))}",
         f"  criticity: {criticity}",
         f"  category: {task.get('category') or 'other'}",
         f"  organizationId: {organization_id}",

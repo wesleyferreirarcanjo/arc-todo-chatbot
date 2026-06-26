@@ -15,7 +15,7 @@ from app.streaming import get_stream_handler
 from app.task_id_resolver import is_friendly_task_id, is_uuid, normalize_friendly_task_id
 
 logger = logging.getLogger(__name__)
-from app.graph.heuristics import _apply_subtask_parent_from_refs, _build_create_parent_with_subtasks_actions, _coerce_mutation_tool, _create_tasks_have_parent, _inject_parent_from_previous, _looks_like_bulk_selected, _looks_like_create_mutation, _looks_like_move_mutation, _looks_like_mutation_confirmation, _looks_like_reparent_mutation, _looks_like_task_mutation, _looks_like_update_mutation, _parse_create_parent_with_subtasks, _resolve_confirmation_update_arguments, _resolve_reparent_arguments
+from app.graph.heuristics import _apply_subtask_parent_from_refs, _build_create_parent_with_subtasks_actions, _coerce_mutation_tool, _create_tasks_have_parent, _inject_parent_from_previous, _looks_like_bulk_selected, _looks_like_create_mutation, _looks_like_move_mutation, _looks_like_mutation_confirmation, _looks_like_reparent_mutation, _looks_like_task_mutation, _looks_like_update_mutation, _parse_create_parent_with_subtasks, _resolve_bug_flag_arguments, _resolve_confirmation_update_arguments, _resolve_reparent_arguments
 from app.graph.llm import _extract_json, _maybe_generate_create_descriptions, _normalize_planner_actions, _normalize_tool_arguments
 from app.graph.mutations import _action_succeeded, _build_mutation_failure_response, _build_verified_mutation_response, _mutation_succeeded, _needs_mutation_tool_result, _validate_mutation_arguments
 from app.graph.prompts import PLANNER_MUTATION_RETRY, PLANNER_PROMPT, RESPONSE_PROMPT, UPDATE_TASK_FIELDS
@@ -331,6 +331,14 @@ async def _execute_single_tool(
         if reparent_arguments:
             tool_name = "update_task"
             arguments = reparent_arguments
+
+        bug_arguments = _resolve_bug_flag_arguments(
+            latest_user_message,
+            task_refs,
+        )
+        if bug_arguments:
+            tool_name = "update_task"
+            arguments = bug_arguments
 
         if task_refs and _looks_like_move_mutation(latest_user_message):
             tool_name = "move_tasks"

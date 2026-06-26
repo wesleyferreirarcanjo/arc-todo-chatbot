@@ -37,6 +37,53 @@ def _looks_like_task_mutation(message: str) -> bool:
 def _looks_like_move_mutation(message: str) -> bool:
     return bool(re.search(r"\bmove\b", message, re.I))
 
+def _looks_like_bug_flag_mutation(message: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:mark|flag|report)\b.*\b(?:as\s+)?bugs?\b"
+            r"|\b(?:bugs?|bugged)\b.*\b(?:task|this|#arc-\d+)\b"
+            r"|\bmark\b.*#arc-\d+.*\bbug",
+            message,
+            re.I,
+        )
+    )
+
+def _looks_like_clear_bug_mutation(message: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:clear|remove|unflag)\b.*\bbug\b",
+            message,
+            re.I,
+        )
+    )
+
+def _resolve_bug_flag_arguments(
+    message: str,
+    task_refs: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    from app.graph.task_refs import _effective_task_refs, _ref_task_id
+
+    if not _looks_like_bug_flag_mutation(message) and not _looks_like_clear_bug_mutation(
+        message,
+    ):
+        return None
+
+    refs = _effective_task_refs(task_refs, message)
+    if len(refs) != 1:
+        return None
+
+    ref = refs[0]
+    task_id = _ref_task_id(ref)
+    if not task_id:
+        return None
+
+    return {
+        "organization_id": ref.get("organizationId") or ref.get("organization_id"),
+        "project_id": ref.get("projectId") or ref.get("project_id"),
+        "task_id": task_id,
+        "is_bug": not _looks_like_clear_bug_mutation(message),
+    }
+
 def _extract_move_target_hint(message: str) -> str | None:
     for pattern in (
         r"\bmove\s+(?:this\s+)?(?:task\s+)?to\s+(.+?)\s*\.?\s*$",

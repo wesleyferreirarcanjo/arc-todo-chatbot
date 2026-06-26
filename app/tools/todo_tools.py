@@ -77,6 +77,7 @@ class TodoTools:
         criticity: str | None = None,
         category: str | None = None,
         parent_task_id: str | None = None,
+        is_bug: bool | None = None,
     ) -> Any:
         params: dict[str, str] = {}
         if organization_id:
@@ -91,6 +92,8 @@ class TodoTools:
             params["category"] = category
         if parent_task_id:
             params["parentTaskId"] = await self._resolve_parent_task_id(parent_task_id)
+        if is_bug is not None:
+            params["isBug"] = "true" if is_bug else "false"
         return await self._client.request("GET", "/tasks", params=params or None)
 
     async def create_task(
@@ -203,6 +206,9 @@ class TodoTools:
         parent_task_id: str | None = None,
         category: str | None = None,
         metadata: dict[str, Any] | None = None,
+        is_bug: bool | None = None,
+        bug_reason: str | None = None,
+        qa_checklist_state: dict[str, Any] | None = None,
     ) -> Any:
         body: dict[str, Any] = {}
         if title is not None:
@@ -229,6 +235,12 @@ class TodoTools:
             body["category"] = category
         if metadata is not None:
             body["metadata"] = metadata
+        if is_bug is not None:
+            body["isBug"] = is_bug
+        if bug_reason is not None:
+            body["bugReason"] = bug_reason
+        if qa_checklist_state is not None:
+            body["qaChecklistState"] = qa_checklist_state
         organization_id, project_id, task_id = await self._resolve_task_scope(
             organization_id=organization_id,
             project_id=project_id,
@@ -323,6 +335,9 @@ class TodoTools:
             "parent_task_id",
             "category",
             "metadata",
+            "is_bug",
+            "bug_reason",
+            "qa_checklist_state",
         )
 
         async def update_one(
@@ -458,6 +473,7 @@ async def execute_todo_tool(
                 category=arguments.get("category"),
                 parent_task_id=arguments.get("parent_task_id")
                 or arguments.get("parent_id"),
+                is_bug=arguments.get("is_bug"),
             )
         if tool_name == "create_task":
             return await tools.create_task(**arguments)
