@@ -109,6 +109,8 @@ def _chunk_header(index: int, chunk: dict[str, Any]) -> str:
         meta_bits.append(f"chunk={chunk['chunkIndex']}")
     if chunk.get("score") is not None:
         meta_bits.append(f"score={float(chunk['score']):.2f}")
+    if chunk.get("taskId"):
+        meta_bits.append(f"task={chunk['taskId']}")
     if chunk.get("knowledgeEntryId"):
         meta_bits.append(f"entry={chunk['knowledgeEntryId']}")
     if chunk.get("updatedAt"):

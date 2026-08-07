@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     rag_timeout_seconds: float = 30.0
     rag_top_k: int = 5
     rag_max_context_tokens: int = 4000
+    rag_min_score: float = 0.45
 
     @property
     def cors_origin_list(self) -> list[str]:

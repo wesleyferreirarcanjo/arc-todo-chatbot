@@ -91,6 +91,8 @@ async def scope_discovery_agent(state: ChatGraphState) -> ChatGraphState:
     return updates
 
 async def context_agent(state: ChatGraphState) -> ChatGraphState:
+    from app.graph.scope_context import build_scope_context, format_scope_context_text
+
     messages = state.get("messages", [])
     latest = next(
         (message["content"] for message in reversed(messages) if message["role"] == "user"),
@@ -100,10 +102,17 @@ async def context_agent(state: ChatGraphState) -> ChatGraphState:
         user_token=state["user_token"],
         task_refs=state.get("task_refs", []),
     )
+    scope_context = await build_scope_context(
+        user_token=state["user_token"],
+        organization_id=state.get("organization_id"),
+        project_id=state.get("project_id"),
+    )
     return {
         **state,
         "latest_user_message": latest,
         "task_context_text": task_context_text,
+        "scope_context": scope_context,
+        "scope_context_text": format_scope_context_text(scope_context),
         "used_tools": state.get("used_tools", []),
     }
 
@@ -130,11 +139,17 @@ async def retrieval_agent(state: ChatGraphState) -> ChatGraphState:
         task_context_text=state.get("task_context_text"),
     )
     rag_client = RagClient(user_token=state["user_token"])
+    task_refs = state.get("task_refs") or []
+    task_id = None
+    if task_refs:
+        first_ref = task_refs[0]
+        task_id = first_ref.get("taskId") or first_ref.get("task_id")
     try:
         result = await rag_client.retrieve(
             question=question,
             organization_id=state.get("organization_id"),
             project_id=state.get("project_id"),
+            task_id=task_id,
         )
         chunks = result.get("chunks") or []
         rag_error = None
@@ -191,10 +206,13 @@ async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) 
 
     model = nodes.build_model(runtime)
     context_bits = []
-    if state.get("organization_id"):
-        context_bits.append(f"organization_id={state['organization_id']}")
-    if state.get("project_id"):
-        context_bits.append(f"project_id={state['project_id']}")
+    if state.get("scope_context_text"):
+        context_bits.append(state["scope_context_text"])
+    else:
+        if state.get("organization_id"):
+            context_bits.append(f"organization_id={state['organization_id']}")
+        if state.get("project_id"):
+            context_bits.append(f"project_id={state['project_id']}")
 
     prompt = PLANNER_PROMPT
     if context_bits:
@@ -603,6 +621,8 @@ async def response_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings)
         tool_context = f"\nTool result:\n{json.dumps(state['tool_result'], indent=2, default=str)}"
     if state.get("error"):
         tool_context += f"\nError:\n{state['error']}"
+    if state.get("scope_context_text"):
+        tool_context += f"\n\n{state['scope_context_text']}"
     if state.get("task_context_text"):
         tool_context += f"\n\n{state['task_context_text']}"
     if state.get("rag_context_text"):

@@ -52,6 +52,7 @@ class RagClient:
         self._timeout = settings.rag_timeout_seconds
         self._top_k = settings.rag_top_k
         self._max_context_tokens = settings.rag_max_context_tokens
+        self._min_score = settings.rag_min_score
         self._http_client = http_client
 
     def _client(self) -> httpx.AsyncClient:
@@ -86,14 +87,17 @@ class RagClient:
         organization_id: str | None = None,
         project_id: str | None = None,
         person_id: str | None = None,
+        task_id: str | None = None,
         top_k: int | None = None,
         max_context_tokens: int | None = None,
+        min_score: float | None = None,
     ) -> dict[str, Any]:
         client = self._client()
         body: dict[str, Any] = {
             "question": question.strip(),
             "topK": top_k or self._top_k,
             "maxContextTokens": max_context_tokens or self._max_context_tokens,
+            "minScore": self._min_score if min_score is None else min_score,
         }
         path, scope_fields = select_retrieve_route(
             organization_id=organization_id,
@@ -101,6 +105,8 @@ class RagClient:
             person_id=person_id,
         )
         body.update(scope_fields)
+        if task_id and path == "/retrieve/project":
+            body["taskId"] = task_id
 
         try:
             response = await client.post(

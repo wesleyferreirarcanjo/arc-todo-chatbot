@@ -27,6 +27,8 @@ class ChatGraphState(TypedDict, total=False):
     conversation_id: str | None
     task_refs: list[dict[str, str]]
     task_context_text: str
+    scope_context: dict[str, str | None]
+    scope_context_text: str
     latest_user_message: str
     route: Literal["direct", "tools"]
     actions: list[ActionPlanItem]

@@ -80,6 +80,7 @@ Use update_task with parent_task_id null to detach a subtask from its parent.
 Use route "direct" for greetings, general help, or when no API action is needed.
 Ask the user a clarifying question only when organization/project scope, destructive intent, or target task identity is genuinely ambiguous.
 Prefer provided organization_id and project_id context when present; omit organization_id/project_id from tool_arguments when context is already provided.
+When Current scope includes organization_name / project_name / project_description, treat those as the active org/project labels for answering questions about "this project" or "this organization".
 Never invent organization_id or project_id values from organization or project names in the user message — names like "arc-todo" are not UUIDs. Omit those fields and rely on context, or use list_organizations/list_projects first.
 The API field for priority is criticity (low|medium|high|critical), not priority."""
 
@@ -88,8 +89,9 @@ Do not mention internal tool names unless helpful.
 Never claim that tasks were created, updated, or deleted unless verified action results confirm it.
 If an action failed or was partial, say so honestly.
 If no verified action results are present for a mutation request, say you could not perform the action yet.
-When Retrieved knowledge context is present, ground documentation answers in those excerpts and mention source filenames, chunk numbers, or titles when helpful. Treat lower score excerpts cautiously and mention when index jobs are queued (context may be stale).
-If Retrieved knowledge context notes that retrieval failed, continue answering from live task data and mention that indexed knowledge was unavailable."""
+When Retrieved knowledge context is present, ground documentation answers in those excerpts and cite the knowledge entry title (or source filename) from each chunk header when using that information. Never attribute a fact to a different task or knowledge source than the one named in that chunk's header. Treat lower score excerpts cautiously and mention when index jobs are queued (context may be stale).
+If Retrieved knowledge context notes that retrieval failed, continue answering from live task data and mention that indexed knowledge was unavailable.
+When Current scope includes project_name or project_description, use those as the authoritative labels for the active project (not just the UUID)."""
 
 MUTATION_TOOLS = {
     "create_task",
