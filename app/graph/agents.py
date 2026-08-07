@@ -20,7 +20,7 @@ from app.graph.llm import _extract_json, _maybe_generate_create_descriptions, _n
 from app.graph.mutations import _action_succeeded, _build_mutation_failure_response, _build_verified_mutation_response, _mutation_succeeded, _needs_mutation_tool_result, _validate_mutation_arguments
 from app.graph.prompts import PLANNER_MUTATION_RETRY, PLANNER_PROMPT, RESPONSE_PROMPT, UPDATE_TASK_FIELDS
 from app.graph.scope import EXISTING_TASK_TOOLS, _apply_resolved_scope, _catalog_from_scope_result, _extract_all_scope_hints, _is_uuid, _resolve_scope_via_api, resolve_scope_arguments
-from app.graph.task_refs import BATCH_TOOL_RESOLVERS, SINGLE_TO_BATCH_TOOL, _apply_task_ref_source_scope, _build_task_context_text, resolve_move_tasks_arguments, resolve_update_tasks_arguments_async
+from app.graph.task_refs import BATCH_TOOL_RESOLVERS, SINGLE_TO_BATCH_TOOL, _apply_task_ref_source_scope, _build_task_context_text, resolve_move_tasks_arguments, resolve_update_tasks_arguments_async, strip_task_ref_tokens
 
 async def scope_discovery_agent(state: ChatGraphState) -> ChatGraphState:
     from app.graph import nodes
@@ -242,9 +242,10 @@ async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) 
         route = "direct"
 
     latest_user_message = state.get("latest_user_message", "")
+    intent_message = strip_task_ref_tokens(latest_user_message)
     if route == "direct" and (
-        _looks_like_task_mutation(latest_user_message)
-        or (task_refs and _looks_like_update_mutation(latest_user_message))
+        _looks_like_task_mutation(intent_message)
+        or (task_refs and _looks_like_update_mutation(intent_message))
     ):
         retry = await model.ainvoke(
             [

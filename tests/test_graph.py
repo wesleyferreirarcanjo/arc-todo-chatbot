@@ -45,6 +45,7 @@ from app.graph.nodes import (
     planner_agent,
     _match_scope_name,
     _mutation_succeeded,
+    _needs_mutation_tool_result,
     _normalize_planner_actions,
     _normalize_tool_arguments,
     _parse_create_parent_with_subtasks,
@@ -53,6 +54,7 @@ from app.graph.nodes import (
     _build_verified_mutation_response,
     _action_succeeded,
     response_agent,
+    strip_task_ref_tokens,
 )
 
 
@@ -651,6 +653,66 @@ def test_mutation_succeeded_requires_create_tasks_result():
 def test_build_mutation_failure_response_when_no_tool_ran():
     message = _build_mutation_failure_response({"route": "direct"})
     assert "no todo action ran" in message.lower()
+
+
+def test_strip_task_ref_tokens_neutralizes_title():
+    message = (
+        "[[ref:11111111-1111-4111-8111-111111111111|"
+        "22222222-2222-4222-8222-222222222222|"
+        "33333333-3333-4333-8333-333333333333|"
+        "Add%20Discord%20bot%20with%20AI%20Q%26A%20and%20auto-triggered%20task%20announcements]] "
+        "what this task about"
+    )
+    stripped = strip_task_ref_tokens(message)
+    assert "[[ref:" not in stripped
+    assert "this task" in stripped
+    assert "what this task about" in stripped
+    assert not _looks_like_task_mutation(stripped)
+    assert not _looks_like_create_mutation(stripped)
+
+
+def test_needs_mutation_tool_result_ignores_ref_title_keywords():
+    question = (
+        "[[ref:11111111-1111-4111-8111-111111111111|"
+        "22222222-2222-4222-8222-222222222222|"
+        "33333333-3333-4333-8333-333333333333|"
+        "Add%20Discord%20bot%20with%20AI%20Q%26A%20and%20auto-triggered%20task%20announcements]] "
+        "what this task about"
+    )
+    task_refs = [
+        {
+            "taskId": "11111111-1111-4111-8111-111111111111",
+            "organizationId": "22222222-2222-4222-8222-222222222222",
+            "projectId": "33333333-3333-4333-8333-333333333333",
+            "title": "Add Discord bot with AI Q&A and auto-triggered task announcements",
+        }
+    ]
+    assert not _needs_mutation_tool_result(
+        {"latest_user_message": question, "task_refs": task_refs, "route": "direct"}
+    )
+    assert _needs_mutation_tool_result(
+        {
+            "latest_user_message": (
+                "[[ref:11111111-1111-4111-8111-111111111111|"
+                "22222222-2222-4222-8222-222222222222|"
+                "33333333-3333-4333-8333-333333333333|"
+                "Add%20Discord%20bot]] mark this task as done"
+            ),
+            "task_refs": task_refs,
+            "route": "direct",
+        }
+    )
+
+
+def test_route_after_retrieval_ignores_ref_title_create_keywords():
+    question = (
+        "[[ref:11111111-1111-4111-8111-111111111111|"
+        "22222222-2222-4222-8222-222222222222|"
+        "33333333-3333-4333-8333-333333333333|"
+        "Add%20Discord%20bot%20with%20AI%20Q%26A%20and%20auto-triggered%20task%20announcements]] "
+        "what this task about"
+    )
+    assert route_after_retrieval({"latest_user_message": question}) == "planner_agent"
 
 
 def test_parse_create_task_titles_from_user_message():

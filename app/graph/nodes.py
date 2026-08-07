@@ -119,6 +119,7 @@ from app.graph.task_refs import (
     resolve_move_tasks_arguments,
     resolve_update_tasks_arguments,
     resolve_update_tasks_arguments_async,
+    strip_task_ref_tokens,
 )
 
 __all__ = [
@@ -137,6 +138,7 @@ __all__ = [
     "_update_arguments_have_fields",
     "_format_task_context_line",
     "_build_task_context_text",
+    "strip_task_ref_tokens",
     "_ref_task_id",
     "_ref_display_id",
     "_normalize_task_identifier",

@@ -23,7 +23,9 @@ from app.graph.prompts import MUTATION_TOOLS
 from app.graph.scope import _is_uuid
 
 def _needs_mutation_tool_result(state: ChatGraphState) -> bool:
-    latest = state.get("latest_user_message", "")
+    from app.graph.task_refs import strip_task_ref_tokens
+
+    latest = strip_task_ref_tokens(state.get("latest_user_message", ""))
     if _looks_like_task_mutation(latest):
         return True
     if state.get("task_refs") and _looks_like_update_mutation(latest):

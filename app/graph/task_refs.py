@@ -116,6 +116,20 @@ async def _build_task_context_text(
 
     return "Selected task context:\n" + "\n".join(lines)
 
+_TASK_REF_TOKEN_PATTERN = re.compile(r"\[\[ref:[^\]]+\]\]")
+
+
+def strip_task_ref_tokens(text: str) -> str:
+    """Replace embedded [[ref:...]] tokens with a neutral phrase for intent heuristics.
+
+    Task titles inside ref tokens can contain mutation keywords (e.g. "Add ... task"),
+    which falsely trip create/update regexes. Argument resolvers still use the raw message.
+    """
+    if not text:
+        return text
+    return _TASK_REF_TOKEN_PATTERN.sub("this task", text)
+
+
 def _ref_task_id(ref: dict[str, str]) -> str | None:
     return ref.get("taskId") or ref.get("task_id")
 
