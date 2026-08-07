@@ -269,6 +269,23 @@ class TodoTools:
             f"/organizations/{organization_id}/projects/{project_id}/tasks/{task_id}",
         )
 
+    async def list_task_history(
+        self,
+        *,
+        organization_id: str,
+        project_id: str,
+        task_id: str,
+    ) -> Any:
+        organization_id, project_id, task_id = await self._resolve_task_scope(
+            organization_id=organization_id,
+            project_id=project_id,
+            task_id=task_id,
+        )
+        return await self._client.request(
+            "GET",
+            f"/organizations/{organization_id}/projects/{project_id}/tasks/{task_id}/history",
+        )
+
     async def delete_task(
         self,
         *,
@@ -506,6 +523,8 @@ async def execute_todo_tool(
             return await tools.delete_tasks(tasks=arguments["tasks"])
         if tool_name == "get_task":
             return await tools.get_task(**arguments)
+        if tool_name == "list_task_history":
+            return await tools.list_task_history(**arguments)
         if tool_name == "get_tasks":
             return await tools.get_tasks(tasks=arguments["tasks"])
         raise ArcTodoApiError(f"Unknown tool: {tool_name}")
