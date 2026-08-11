@@ -51,7 +51,9 @@ def _looks_like_bug_flag_mutation(message: str) -> bool:
 def _looks_like_clear_bug_mutation(message: str) -> bool:
     return bool(
         re.search(
-            r"\b(?:clear|remove|unflag)\b.*\bbug\b",
+            r"\b(?:clear|remove|unflag|solve|resolv(?:e|ed|ido))\b.*\bbug\b"
+            r"|\bbug\b.*\b(?:resolvido|solved)\b"
+            r"|\bmarcar\s+como\s+resolvido\b",
             message,
             re.I,
         )
