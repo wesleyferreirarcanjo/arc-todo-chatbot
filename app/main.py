@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from app.chatbot_settings import ChatbotSettingsError, chatbot_settings_client
 from app.config import settings
-from app.errors import WorkflowError, disabled_error, settings_error, validation_error
+from app.errors import WorkflowError, auth_error, disabled_error, settings_error, validation_error
 from app.graph.workflow import run_chat_workflow, run_chat_workflow_streaming
 from app.http_pool import create_shared_http_client, get_shared_http_client, set_shared_http_client
 from app.logging_context import bind_request_context, configure_logging, reset_request_context
@@ -46,7 +46,7 @@ app.add_middleware(
 
 def extract_bearer_token(authorization: str | None = Header(default=None)) -> str:
     if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
+        raise workflow_http_exception(auth_error())
     return authorization.split(" ", 1)[1].strip()
 
 
@@ -113,7 +113,7 @@ async def chat(
     user_token: str = Depends(extract_bearer_token),
 ):
     if not request.messages:
-        raise workflow_http_exception(validation_error("At least one message is required"))
+        raise workflow_http_exception(validation_error())
 
     runtime = await load_runtime_settings()
     tokens = bind_request_context(conversation_id=request.conversation_id, route="/chat")
@@ -145,7 +145,7 @@ async def chat_stream(
     user_token: str = Depends(extract_bearer_token),
 ):
     if not request.messages:
-        raise workflow_http_exception(validation_error("At least one message is required"))
+        raise workflow_http_exception(validation_error())
 
     runtime = await load_runtime_settings()
 
