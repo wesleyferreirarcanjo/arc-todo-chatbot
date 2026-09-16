@@ -116,6 +116,39 @@ def auth_error(
     )
 
 
+def naming_validation_error(
+    message: str = "Add one sentence about what it does, then generate names. You can still check a name.",
+) -> WorkflowError:
+    return WorkflowError(
+        code="ERR-ARC-NAME-28",
+        stage="request",
+        message=message,
+        status_code=400,
+    )
+
+
+def naming_forbidden_error(
+    message: str = "You do not have access to this naming session.",
+) -> WorkflowError:
+    return WorkflowError(
+        code="ERR-ARC-NAME-29",
+        stage="auth",
+        message=message,
+        status_code=403,
+    )
+
+
+def naming_llm_error(
+    message: str = "Names could not be generated just now. Try again without losing the brief.",
+) -> WorkflowError:
+    return WorkflowError(
+        code="ERR-ARC-NAME-30",
+        stage="response",
+        message=message,
+        status_code=502,
+    )
+
+
 def from_exception(exc: Exception, *, stage: str = "workflow") -> WorkflowError:
     if isinstance(exc, WorkflowError):
         return exc

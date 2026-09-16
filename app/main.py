@@ -9,13 +9,24 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from app.chatbot_settings import ChatbotSettingsError, chatbot_settings_client
+from app.chatbot_settings import ChatbotRuntimeSettings, ChatbotSettingsError, chatbot_settings_client
 from app.config import settings
-from app.errors import WorkflowError, auth_error, disabled_error, settings_error, validation_error
+from app.arc_todo_client import ArcTodoApiError, ArcTodoClient
+from app.errors import (
+    WorkflowError,
+    auth_error,
+    disabled_error,
+    from_exception,
+    naming_forbidden_error,
+    naming_validation_error,
+    settings_error,
+    validation_error,
+)
 from app.graph.workflow import run_chat_workflow, run_chat_workflow_streaming
 from app.http_pool import create_shared_http_client, get_shared_http_client, set_shared_http_client
 from app.logging_context import bind_request_context, configure_logging, reset_request_context
-from app.models import ChatRequest, ChatResponse
+from app.models import ChatRequest, ChatResponse, NamingGenerateRequest, NamingGenerateResponse
+from app.naming import NAMING_MAX_COUNT, clamp_count, generate_name_suggestions
 from app.streaming import StreamEventHandler, format_sse
 
 logger = logging.getLogger(__name__)
@@ -137,6 +148,54 @@ async def chat(
         message=result.get("response") or "I could not generate a response.",
         usedTools=result.get("used_tools", []),
     )
+
+
+@app.post("/names/generate", response_model=NamingGenerateResponse)
+async def generate_names(
+    request: NamingGenerateRequest,
+    user_token: str = Depends(extract_bearer_token),
+    runtime: ChatbotRuntimeSettings = Depends(load_runtime_settings),
+):
+    what_it_is = str(request.product_description.get("whatItIs") or "").strip()
+    if not what_it_is:
+        raise workflow_http_exception(naming_validation_error())
+    if request.count < 1 or request.count > NAMING_MAX_COUNT:
+        raise workflow_http_exception(
+            naming_validation_error(
+                f"Ask for {NAMING_MAX_COUNT} names or fewer, then generate again."
+            )
+        )
+
+    tokens = bind_request_context(route="/names/generate")
+    try:
+        client = ArcTodoClient(user_token=user_token)
+        try:
+            await client.get_name_session(
+                request.organization_id,
+                request.project_id,
+                request.session_id,
+            )
+        except ArcTodoApiError as exc:
+            if exc.status_code in {401, 403, 404}:
+                raise workflow_http_exception(naming_forbidden_error()) from exc
+            raise workflow_http_exception(from_exception(exc, stage="auth")) from exc
+
+        suggestions = await generate_name_suggestions(
+            runtime,
+            title=request.title,
+            naming_goal=request.naming_goal,
+            product_description=request.product_description,
+            count=clamp_count(request.count),
+            avoid=request.avoid,
+            refinement=request.refinement,
+        )
+    except WorkflowError as exc:
+        logger.warning("Naming generate failed: %s", exc.message)
+        raise workflow_http_exception(exc) from exc
+    finally:
+        reset_request_context(tokens)
+
+    return NamingGenerateResponse(suggestions=suggestions, usedTools=[])
 
 
 @app.post("/chat/stream")
