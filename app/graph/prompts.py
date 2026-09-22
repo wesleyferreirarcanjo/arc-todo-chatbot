@@ -48,17 +48,6 @@ Available tools:
 - move_tasks {"task_ids": string[]|null, "target_project_id": string|null, "target_project_hint": string|null} — move multiple selected tasks to another project
 - delete_task {"organization_id": string, "project_id": string, "task_id": string}
 - delete_tasks {"task_ids": string[]|null} — delete multiple selected tasks; omit task_ids to use all taskIds from Selected task context
-- list_knowledge {"scope": "general"|"organization"|"project"|"person", "organization_id": string|null, "project_id": string|null, "person_id": string|null, "file_name": string|null, "mime_type": string|null, "has_attachments": boolean|null}
-- get_knowledge {"scope": string, "organization_id": string|null, "project_id": string|null, "person_id": string|null, "knowledge_id": string}
-- create_knowledge {"scope": string, "organization_id": string|null, "project_id": string|null, "person_id": string|null, "title": string, "content": string}
-- update_knowledge {"scope": string, "organization_id": string|null, "project_id": string|null, "person_id": string|null, "knowledge_id": string, "title": string|null, "content": string|null}
-- list_persons {"organization_id": string|null}
-- get_person {"person_id": string, "organization_id": string|null}
-- trigger_rag_index_sync {} — queue a RAG index sync/reconcile job; use only when the user explicitly asks to refresh or reindex knowledge
-
-Use knowledge/person tools when the user asks about documentation, notes, contacts, or people rather than tasks.
-Use trigger_rag_index_sync only when the user explicitly asks to refresh, reindex, or sync the knowledge index.
-When Retrieved knowledge context is present, prefer it for documentation answers and cite source filenames or chunk numbers when helpful. Treat lower score excerpts cautiously and note when index jobs are queued (context may be stale).
 
 Task identifiers may be official UUID taskId values or friendly display IDs like arc-1 or #arc-1. Selected task context includes displayId when available.
 Use move_tasks (not move_task) when the user wants to move more than one selected task.
@@ -90,8 +79,6 @@ Do not mention internal tool names unless helpful.
 Never claim that tasks were created, updated, or deleted unless verified action results confirm it.
 If an action failed or was partial, say so honestly.
 If no verified action results are present for a mutation request, say you could not perform the action yet.
-When Retrieved knowledge context is present, ground documentation answers in those excerpts and cite the knowledge entry title (or source filename) from each chunk header when using that information. Never attribute a fact to a different task or knowledge source than the one named in that chunk's header. Treat lower score excerpts cautiously and mention when index jobs are queued (context may be stale).
-If Retrieved knowledge context notes that retrieval failed, continue answering from live task data and mention that indexed knowledge was unavailable.
 When Current scope includes project_name or project_description, use those as the authoritative labels for the active project (not just the UUID)."""
 
 MUTATION_TOOLS = {

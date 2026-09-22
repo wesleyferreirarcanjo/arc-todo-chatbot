@@ -38,8 +38,8 @@ class ChatResponse(BaseModel):
 
 
 class NamingGenerateRequest(BaseModel):
-    organization_id: str = Field(alias="organizationId")
-    project_id: str = Field(alias="projectId")
+    organization_id: str | None = Field(default=None, alias="organizationId")
+    project_id: str | None = Field(default=None, alias="projectId")
     session_id: str = Field(alias="sessionId")
     title: str = ""
     naming_goal: str | None = Field(default=None, alias="namingGoal")

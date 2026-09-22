@@ -170,11 +170,7 @@ async def generate_names(
     try:
         client = ArcTodoClient(user_token=user_token)
         try:
-            await client.get_name_session(
-                request.organization_id,
-                request.project_id,
-                request.session_id,
-            )
+            await client.get_name_session(request.session_id)
         except ArcTodoApiError as exc:
             if exc.status_code in {401, 403, 404}:
                 raise workflow_http_exception(naming_forbidden_error()) from exc

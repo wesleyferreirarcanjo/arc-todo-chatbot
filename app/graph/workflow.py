@@ -12,10 +12,8 @@ from app.graph.nodes import (
     context_agent,
     planner_agent,
     response_agent,
-    retrieval_agent,
     route_after_context,
     route_after_planner,
-    route_after_retrieval,
     route_after_scope_discovery,
     route_after_tools,
     scope_discovery_agent,
@@ -41,7 +39,6 @@ def build_chat_graph(runtime: ChatbotRuntimeSettings):
         return await todo_tools_agent(state, runtime)
 
     graph.add_node("context_agent", context_agent)
-    graph.add_node("retrieval_agent", retrieval_agent)
     graph.add_node("scope_discovery_agent", scope_discovery_agent)
     graph.add_node("planner_agent", planner_node)
     graph.add_node("todo_tools_agent", tools_node)
@@ -51,13 +48,6 @@ def build_chat_graph(runtime: ChatbotRuntimeSettings):
     graph.add_conditional_edges(
         "context_agent",
         route_after_context,
-        {
-            "retrieval_agent": "retrieval_agent",
-        },
-    )
-    graph.add_conditional_edges(
-        "retrieval_agent",
-        route_after_retrieval,
         {
             "scope_discovery_agent": "scope_discovery_agent",
             "planner_agent": "planner_agent",
@@ -129,12 +119,6 @@ def _build_initial_state(
         "conversation_id": conversation_id,
         "task_refs": task_refs or [],
         "used_tools": [],
-        "rag_chunks": [],
-        "rag_context_text": "",
-        "rag_error": None,
-        "rag_search_query": None,
-        "rag_token_usage": None,
-        "rag_index_status": None,
     }
 
 

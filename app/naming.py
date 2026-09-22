@@ -46,7 +46,7 @@ GOAL_LABELS = {
 }
 
 NAMING_SYSTEM_PROMPT = """You suggest names for a web tool, product, or company.
-Return JSON only. Do not call tools. Do not look up tasks, knowledge, conversations, or other projects.
+Return JSON only. Do not call tools. Do not look up tasks, conversations, or other projects.
 Do not judge domain, trademark, language, search ranking, or legal clearance.
 Do not include scores, ratings, votes, winners, or evidence fields.
 Honor the brief's personality, length, and style. Do not force a god-name or invented-only style unless the brief asks for it.

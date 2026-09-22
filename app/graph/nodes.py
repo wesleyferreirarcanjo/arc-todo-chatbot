@@ -7,7 +7,6 @@ from app.graph.agents import (
     context_agent,
     planner_agent,
     response_agent,
-    retrieval_agent,
     scope_discovery_agent,
     todo_tools_agent,
 )
@@ -73,7 +72,6 @@ from app.graph.prompts import (
 from app.graph.routing import (
     route_after_context,
     route_after_planner,
-    route_after_retrieval,
     route_after_scope_discovery,
     route_after_tools,
 )
@@ -213,7 +211,6 @@ __all__ = [
     "resolve_move_tasks_arguments",
     "BATCH_TOOL_RESOLVERS",
     "context_agent",
-    "retrieval_agent",
     "_format_action_success_line",
     "_format_action_failure_line",
     "_build_verified_mutation_response",
@@ -222,7 +219,6 @@ __all__ = [
     "todo_tools_agent",
     "response_agent",
     "route_after_context",
-    "route_after_retrieval",
     "route_after_scope_discovery",
     "route_after_tools",
     "route_after_planner",

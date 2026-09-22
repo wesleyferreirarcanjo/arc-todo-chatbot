@@ -139,8 +139,8 @@ def test_generate_returns_structured_suggestions_without_task_mutation(monkeypat
         def __init__(self, user_token: str | None = None, **kwargs) -> None:
             assert user_token == "user-jwt"
 
-        async def get_name_session(self, organization_id, project_id, session_id):
-            api_calls.append(("GET", f"{organization_id}/{project_id}/{session_id}"))
+        async def get_name_session(self, session_id):
+            api_calls.append(("GET", session_id))
             return {"id": SESS}
 
         async def request(self, method: str, path: str, **kwargs):
@@ -157,7 +157,7 @@ def test_generate_returns_structured_suggestions_without_task_mutation(monkeypat
     assert payload["suggestions"] == [
         {"name": "Luma", "rationale": "warm light", "family": "invented"},
     ]
-    assert api_calls == [("GET", f"{ORG}/{PROJ}/{SESS}")]
+    assert api_calls == [("GET", SESS)]
     prompt = str(fake.calls[0][1].content)
     assert "A coffee subscription for small offices." in prompt
     assert "Office managers" in prompt

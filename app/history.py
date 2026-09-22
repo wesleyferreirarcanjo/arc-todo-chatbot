@@ -3,6 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 
+def format_recent_conversation(messages: list[dict[str, str]]) -> str:
+    lines: list[str] = []
+    for message in messages:
+        role = str(message.get("role") or "user").capitalize()
+        content = str(message.get("content") or "").strip()
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
 def estimate_tokens(text: str) -> int:
     # ponytail: chars/4 heuristic; upgrade path is tiktoken when accuracy matters
     return max(1, len(text) // 4)

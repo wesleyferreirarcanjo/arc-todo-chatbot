@@ -10,7 +10,7 @@ from langchain_openai import ChatOpenAI
 
 from app.chatbot_settings import ChatbotRuntimeSettings
 from app.graph.state import ChatGraphState
-from app.history import trim_messages
+from app.history import format_recent_conversation, trim_messages
 from app.streaming import get_stream_handler
 from app.task_id_resolver import is_friendly_task_id, is_uuid, normalize_friendly_task_id
 
@@ -116,68 +116,6 @@ async def context_agent(state: ChatGraphState) -> ChatGraphState:
         "used_tools": state.get("used_tools", []),
     }
 
-async def retrieval_agent(state: ChatGraphState) -> ChatGraphState:
-    from app.graph import nodes
-    from app.graph.rag_context import build_rag_context_text, build_retrieval_query
-    from app.rag_client import RagClient, RagClientError
-
-    latest = state.get("latest_user_message", "").strip()
-    if not latest:
-        return {
-            **state,
-            "rag_chunks": [],
-            "rag_context_text": "",
-            "rag_error": None,
-            "rag_search_query": None,
-            "rag_token_usage": None,
-            "rag_index_status": None,
-        }
-
-    question = build_retrieval_query(
-        state.get("messages", []),
-        latest,
-        task_context_text=state.get("task_context_text"),
-    )
-    rag_client = RagClient(user_token=state["user_token"])
-    task_refs = state.get("task_refs") or []
-    task_id = None
-    if task_refs:
-        first_ref = task_refs[0]
-        task_id = first_ref.get("taskId") or first_ref.get("task_id")
-    try:
-        result = await rag_client.retrieve(
-            question=question,
-            organization_id=state.get("organization_id"),
-            project_id=state.get("project_id"),
-            task_id=task_id,
-        )
-        chunks = result.get("chunks") or []
-        rag_error = None
-        rag_search_query = result.get("searchQuery")
-        rag_token_usage = result.get("tokenUsage")
-        rag_index_status = result.get("indexStatus")
-    except RagClientError as exc:
-        chunks = []
-        rag_error = str(exc)
-        rag_search_query = None
-        rag_token_usage = None
-        rag_index_status = None
-        logger.warning("RAG retrieval failed: %s", rag_error)
-
-    rag_context_text = build_rag_context_text(
-        chunks,
-        rag_error=rag_error,
-        index_status=rag_index_status,
-    )
-    return {
-        **state,
-        "rag_chunks": chunks,
-        "rag_context_text": rag_context_text,
-        "rag_error": rag_error,
-        "rag_search_query": rag_search_query,
-        "rag_token_usage": rag_token_usage,
-        "rag_index_status": rag_index_status,
-    }
 
 async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) -> ChatGraphState:
     from app.graph import nodes
@@ -219,12 +157,8 @@ async def planner_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings) 
         prompt += "\nContext: " + ", ".join(context_bits)
     if state.get("task_context_text"):
         prompt += "\n\n" + state["task_context_text"]
-    if state.get("rag_context_text"):
-        prompt += "\n\n" + state["rag_context_text"]
 
     planner_messages = trim_messages(messages, max_messages=6, max_tokens=2000)
-    from app.graph.rag_context import format_recent_conversation
-
     conversation_text = format_recent_conversation(planner_messages)
     human_content = latest_user_message
     if conversation_text and conversation_text.strip() != f"User: {latest_user_message}".strip():
@@ -476,17 +410,7 @@ async def _execute_single_tool(
             return tool_name, arguments, None, validation_error
         api_arguments = dict(arguments)
         api_arguments.pop("_parent_title", None)
-        from app.tools.knowledge_tools import KNOWLEDGE_TOOLS, KnowledgeTools, execute_knowledge_tool
-        from app.rag_client import RagClient
-
-        if tool_name in KNOWLEDGE_TOOLS:
-            knowledge_tools = KnowledgeTools(
-                client,
-                rag_client=RagClient(user_token=state["user_token"]),
-            )
-            result = await execute_knowledge_tool(knowledge_tools, tool_name, api_arguments)
-        else:
-            result = await nodes.execute_todo_tool(tools, tool_name, api_arguments)
+        result = await nodes.execute_todo_tool(tools, tool_name, api_arguments)
         return tool_name, arguments, result, None
     except nodes.ArcTodoApiError as exc:
         return tool_name, arguments, None, str(exc)
@@ -626,8 +550,6 @@ async def response_agent(state: ChatGraphState, runtime: ChatbotRuntimeSettings)
         tool_context += f"\n\n{state['scope_context_text']}"
     if state.get("task_context_text"):
         tool_context += f"\n\n{state['task_context_text']}"
-    if state.get("rag_context_text"):
-        tool_context += f"\n\n{state['rag_context_text']}"
 
     prompt_messages = [
         SystemMessage(content=RESPONSE_PROMPT),

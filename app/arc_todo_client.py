@@ -106,16 +106,8 @@ class ArcTodoClient:
     async def get_conversation(self, conversation_id: str) -> Any:
         return await self.request("GET", f"/conversations/{conversation_id}")
 
-    async def get_name_session(
-        self,
-        organization_id: str,
-        project_id: str,
-        session_id: str,
-    ) -> Any:
-        return await self.request(
-            "GET",
-            f"/organizations/{organization_id}/projects/{project_id}/name-sessions/{session_id}",
-        )
+    async def get_name_session(self, session_id: str) -> Any:
+        return await self.request("GET", f"/name-sessions/{session_id}")
 
     async def add_conversation_message(
         self,

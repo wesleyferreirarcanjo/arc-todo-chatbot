@@ -26,7 +26,6 @@ from app.graph.nodes import (
     resolve_update_tasks_arguments,
     resolve_update_tasks_arguments_async,
     route_after_context,
-    route_after_retrieval,
     route_after_planner,
     route_after_scope_discovery,
     route_after_tools,
@@ -79,6 +78,16 @@ def test_route_after_planner_tools():
 
 def test_route_after_planner_direct():
     assert route_after_planner({"route": "direct"}) == "response_agent"
+
+
+def test_chat_graph_compiles_without_retrieval():
+    from app.graph.workflow import build_chat_graph
+
+    runtime = MagicMock()
+    graph = build_chat_graph(runtime)
+    node_names = set(graph.get_graph().nodes)
+    assert "retrieval_agent" not in node_names
+    assert {"context_agent", "scope_discovery_agent", "planner_agent", "todo_tools_agent", "response_agent"} <= node_names
 
 
 def test_resolve_bug_flag_arguments_uses_selected_task():
@@ -241,26 +250,32 @@ async def test_delete_tasks_tool_calls_delete_task_for_each():
                 {
                     "organization_id": "org1",
                     "project_id": "proj1",
-                    "task_id": "t1",
+                    "task_id": "11111111-1111-4111-8111-111111111111",
                 },
                 {
                     "organization_id": "org1",
                     "project_id": "proj2",
-                    "task_id": "t2",
+                    "task_id": "22222222-2222-4222-8222-222222222222",
                 },
             ],
         },
     )
 
-    assert result == {"deleted": ["t1", "t2"], "failed": []}
+    assert result == {
+        "deleted": [
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        ],
+        "failed": [],
+    }
     assert client.request.await_count == 2
     client.request.assert_any_await(
         "DELETE",
-        "/organizations/org1/projects/proj1/tasks/t1",
+        "/organizations/org1/projects/proj1/tasks/11111111-1111-4111-8111-111111111111",
     )
     client.request.assert_any_await(
         "DELETE",
-        "/organizations/org1/projects/proj2/tasks/t2",
+        "/organizations/org1/projects/proj2/tasks/22222222-2222-4222-8222-222222222222",
     )
 
 
@@ -405,25 +420,28 @@ async def test_update_tasks_tool_calls_update_task_for_each():
                 {
                     "organization_id": "org1",
                     "project_id": "proj1",
-                    "task_id": "t1",
+                    "task_id": "11111111-1111-4111-8111-111111111111",
                     "status": "done",
                 },
                 {
                     "organization_id": "org1",
                     "project_id": "proj1",
-                    "task_id": "t2",
+                    "task_id": "22222222-2222-4222-8222-222222222222",
                     "status": "done",
                 },
             ],
         },
     )
 
-    assert result["updated"] == ["t1", "t2"]
+    assert result["updated"] == [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+    ]
     assert result["failed"] == []
     assert client.request.await_count == 2
     client.request.assert_any_await(
         "PATCH",
-        "/organizations/org1/projects/proj1/tasks/t1",
+        "/organizations/org1/projects/proj1/tasks/11111111-1111-4111-8111-111111111111",
         json_body={"status": "done"},
     )
 
@@ -441,7 +459,7 @@ async def test_create_tasks_tool_calls_create_task_for_each():
             "organization_id": "org1",
             "project_id": "proj1",
             "tasks": [
-                {"title": "RAG system"},
+                {"title": "notes index"},
                 {"title": "Repository link connection"},
             ],
         },
@@ -454,7 +472,7 @@ async def test_create_tasks_tool_calls_create_task_for_each():
         "POST",
         "/organizations/org1/projects/proj1/tasks",
         json_body={
-            "title": "RAG system",
+            "title": "notes index",
             "status": "todo",
             "criticity": "medium",
             "category": "other",
@@ -474,7 +492,7 @@ async def test_create_tasks_tool_applies_top_level_parent_task_id():
         {
             "organization_id": "org1",
             "project_id": "proj1",
-            "parent_task_id": "parent-1",
+            "parent_task_id": "33333333-3333-4333-8333-333333333333",
             "tasks": [
                 {"title": "Sub one"},
                 {"title": "Sub two"},
@@ -490,7 +508,8 @@ async def test_create_tasks_tool_applies_top_level_parent_task_id():
             "title": "Sub one",
             "status": "todo",
             "criticity": "medium",
-            "parentTaskId": "parent-1",
+            "category": "other",
+            "parentTaskId": "33333333-3333-4333-8333-333333333333",
         },
     )
 
@@ -509,18 +528,21 @@ async def test_get_tasks_tool_calls_get_task_for_each():
                 {
                     "organization_id": "org1",
                     "project_id": "proj1",
-                    "task_id": "t1",
+                    "task_id": "11111111-1111-4111-8111-111111111111",
                 },
                 {
                     "organization_id": "org1",
                     "project_id": "proj2",
-                    "task_id": "t2",
+                    "task_id": "22222222-2222-4222-8222-222222222222",
                 },
             ],
         },
     )
 
-    assert result["fetched"] == ["t1", "t2"]
+    assert result["fetched"] == [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+    ]
     assert result["tasks"] == [{"id": "t1"}, {"id": "t2"}]
     assert result["failed"] == []
     assert client.request.await_count == 2
@@ -550,7 +572,7 @@ async def test_resolve_scope_arguments_prefers_state_uuid_over_planner_slug():
         arguments={
             "organization_id": "arc-todo",
             "project_id": "backend",
-            "title": "RAG system",
+            "title": "notes index",
         },
         state={
             "organization_id": "4797da9c-f611-4bb8-b736-849a824c5fbc",
@@ -589,7 +611,7 @@ async def test_resolve_scope_arguments_resolves_organization_name():
         arguments={
             "organization_id": "arc-todo",
             "project_id": "Platform",
-            "title": "RAG system",
+            "title": "notes index",
         },
         state={"latest_user_message": "create a task in arc-todo project"},
     )
@@ -617,7 +639,7 @@ async def test_todo_tools_agent_returns_error_instead_of_raising():
                 "tool_arguments": {
                     "organization_id": "4797da9c-f611-4bb8-b736-849a824c5fbc",
                     "project_id": "8b2f0a44-1d63-4f7a-9c2e-111111111111",
-                    "title": "RAG system",
+                    "title": "notes index",
                 },
                 "used_tools": [],
             }
@@ -704,7 +726,7 @@ def test_needs_mutation_tool_result_ignores_ref_title_keywords():
     )
 
 
-def test_route_after_retrieval_ignores_ref_title_create_keywords():
+def test_route_after_context_ignores_ref_title_create_keywords():
     question = (
         "[[ref:11111111-1111-4111-8111-111111111111|"
         "22222222-2222-4222-8222-222222222222|"
@@ -712,18 +734,18 @@ def test_route_after_retrieval_ignores_ref_title_create_keywords():
         "Add%20Discord%20bot%20with%20AI%20Q%26A%20and%20auto-triggered%20task%20announcements]] "
         "what this task about"
     )
-    assert route_after_retrieval({"latest_user_message": question}) == "planner_agent"
+    assert route_after_context({"latest_user_message": question}) == "planner_agent"
 
 
 def test_parse_create_task_titles_from_user_message():
     message = (
-        "create a task to arc-todo create the rag system for the assisstant\n\n"
+        "create a task to arc-todo create the notes index for the assisstant\n\n"
         "another task create the repositories link connection to task.\n\n"
         "in my system"
     )
     titles = _parse_create_task_titles(message)
     assert titles == [
-        "rag system for the assisstant",
+        "notes index for the assisstant",
         "repositories link connection to task",
     ]
 
@@ -732,7 +754,7 @@ def test_coerce_mutation_tool_overrides_list_organizations():
     tool_name, arguments = _coerce_mutation_tool(
         {
             "latest_user_message": (
-                "create a task to arc-todo create the rag system for the assisstant\n\n"
+                "create a task to arc-todo create the notes index for the assisstant\n\n"
                 "another task create the repositories link connection to task.\n\n"
                 "in my system"
             ),
@@ -748,7 +770,7 @@ def test_coerce_mutation_tool_overrides_list_organizations():
 
 def test_extract_all_scope_hints_in_arc_todo_project():
     org_hint, project_hints = _extract_all_scope_hints(
-        "create a task in arc-todo project create the rag system\n\nin my system"
+        "create a task in arc-todo project create the notes index\n\nin my system"
     )
     assert org_hint == "arc-todo"
     assert project_hints == ["my system"]
@@ -783,7 +805,7 @@ def test_resolve_update_tasks_arguments_uses_all_refs_for_description_update():
             "taskId": "t3",
             "organizationId": "org1",
             "projectId": "proj2",
-            "title": "rag system for the assistant",
+            "title": "notes index for the assistant",
         },
     ]
 
@@ -858,7 +880,7 @@ async def test_resolve_update_tasks_arguments_async_generates_distinct_descripti
             "taskId": "t3",
             "organizationId": "org1",
             "projectId": "proj2",
-            "title": "rag system for the assistant",
+            "title": "notes index for the assistant",
         },
     ]
     runtime = MagicMock()
@@ -869,7 +891,7 @@ async def test_resolve_update_tasks_arguments_async_generates_distinct_descripti
             return_value={
                 "t1": "Increase conversation history to 50 interactions or 100k tokens.",
                 "t2": "Connect repository links to tasks.",
-                "t3": "Add a RAG system for the assistant.",
+                "t3": "Add a notes index for the assistant.",
             }
         ),
     ):
@@ -885,11 +907,11 @@ async def test_resolve_update_tasks_arguments_async_generates_distinct_descripti
     assert len(set(descriptions)) == 3
     assert descriptions[0].startswith("Increase conversation history")
     assert descriptions[1].startswith("Connect repository links")
-    assert descriptions[2].startswith("Add a RAG system")
+    assert descriptions[2].startswith("Add a notes index")
 
 
 def test_fix_description_matches_update_mutation():
-    message = "fix the description of: repositories link connect rag system for the assiss"
+    message = "fix the description of: repositories link connect notes index for the assiss"
     assert _looks_like_update_mutation(message)
 
 
@@ -897,11 +919,11 @@ def test_filter_task_refs_by_message_keeps_mentioned_subset():
     task_refs = [
         {"taskId": "t1", "title": "make assistant smarter"},
         {"taskId": "t2", "title": "repositories link connect"},
-        {"taskId": "t3", "title": "rag system for the assistant"},
+        {"taskId": "t3", "title": "notes index for the assistant"},
     ]
     filtered = _filter_task_refs_by_message(
         task_refs,
-        "fix the description of: repositories link connect rag system for the assiss",
+        "fix the description of: repositories link connect notes index for the assiss",
     )
     assert [ref["taskId"] for ref in filtered] == ["t2", "t3"]
 
@@ -910,14 +932,14 @@ def test_extract_proposed_descriptions_from_assistant():
     text = (
         "1. **repositories link connection to task** — "
         '*"Set up repository linking for tasks."*\n'
-        "2. **rag system for the assisstant** — "
-        '*"Implement a RAG system for the assistant."*\n\n'
+        "2. **notes index for the assisstant** — "
+        '*"Implement a notes index for the assistant."*\n\n'
         "Would you like me to apply these descriptions?"
     )
     proposals = _extract_proposed_descriptions_from_assistant(text)
     assert len(proposals) == 2
     assert "repository linking" in proposals[0][1]
-    assert "RAG system" in proposals[1][1]
+    assert "notes index" in proposals[1][1]
 
 
 def test_resolve_confirmation_update_arguments():
@@ -928,8 +950,8 @@ def test_resolve_confirmation_update_arguments():
             "content": (
                 "1. **repositories link connection to task** — "
                 '*"Set up repository linking for tasks."*\n'
-                "2. **rag system for the assisstant** — "
-                '*"Implement a RAG system for the assistant."*\n\n'
+                "2. **notes index for the assisstant** — "
+                '*"Implement a notes index for the assistant."*\n\n'
                 "Would you like me to apply these descriptions?"
             ),
         },
@@ -946,7 +968,7 @@ def test_resolve_confirmation_update_arguments():
             "taskId": "t3",
             "organizationId": "org1",
             "projectId": "proj2",
-            "title": "rag system for the assistant",
+            "title": "notes index for the assistant",
         },
     ]
     result = _resolve_confirmation_update_arguments(messages, task_refs)
@@ -969,8 +991,8 @@ async def test_planner_agent_confirmation_routes_to_update_tasks():
                         "content": (
                             "1. **repositories link connection to task** — "
                             '*"Set up repository linking for tasks."*\n'
-                            "2. **rag system for the assisstant** — "
-                            '*"Implement a RAG system for the assistant."*\n\n'
+                            "2. **notes index for the assisstant** — "
+                            '*"Implement a notes index for the assistant."*\n\n'
                             "Would you like me to apply these descriptions?"
                         ),
                     },
@@ -988,7 +1010,7 @@ async def test_planner_agent_confirmation_routes_to_update_tasks():
                         "taskId": "t3",
                         "organizationId": "org1",
                         "projectId": "proj2",
-                        "title": "rag system for the assistant",
+                        "title": "notes index for the assistant",
                     },
                 ],
             },
@@ -1002,16 +1024,15 @@ async def test_planner_agent_confirmation_routes_to_update_tasks():
 
 
 def test_create_mutation_routes_through_scope_discovery():
-    assert route_after_context({"latest_user_message": "create a task in arc-todo project"}) == "retrieval_agent"
-    assert route_after_retrieval({"latest_user_message": "create a task in arc-todo project"}) == "scope_discovery_agent"
-    assert route_after_retrieval(
+    assert route_after_context({"latest_user_message": "create a task in arc-todo project"}) == "scope_discovery_agent"
+    assert route_after_context(
         {"latest_user_message": "add description for this task"}
     ) == "planner_agent"
-    assert route_after_retrieval(
+    assert route_after_context(
         {
             "latest_user_message": (
                 "make assistant smater and... repositories link connect... "
-                "rag system for the assiss... create a description for this tasks"
+                "notes index for the assiss... create a description for this tasks"
             )
         }
     ) == "planner_agent"
@@ -1079,7 +1100,7 @@ async def test_scope_discovery_agent_uses_api_resolver():
             {
                 "user_token": "token",
                 "latest_user_message": (
-                    "create a task in arc-todo project create the rag system\n\nin my system"
+                    "create a task in arc-todo project create the notes index\n\nin my system"
                 ),
                 "used_tools": [],
             }
@@ -1218,7 +1239,7 @@ async def test_todo_tools_agent_update_description_does_not_call_create_tasks():
             return_value={
                 "t1": "Increase conversation history to 50 interactions or 100k tokens.",
                 "t2": "Connect repository links to tasks.",
-                "t3": "Add a RAG system for the assistant.",
+                "t3": "Add a notes index for the assistant.",
             }
         ),
     ):
@@ -1232,7 +1253,7 @@ async def test_todo_tools_agent_update_description_does_not_call_create_tasks():
                 },
                 "latest_user_message": (
                     "make assistant smater and... repositories link connect... "
-                    "rag system for the assiss... create a description for this tasks"
+                    "notes index for the assiss... create a description for this tasks"
                 ),
                 "task_refs": [
                     {
@@ -1251,7 +1272,7 @@ async def test_todo_tools_agent_update_description_does_not_call_create_tasks():
                         "taskId": "t3",
                         "organizationId": "org1",
                         "projectId": "proj2",
-                        "title": "rag system for the assistant",
+                        "title": "notes index for the assistant",
                     },
                 ],
                 "used_tools": [],
@@ -1638,11 +1659,11 @@ async def test_create_task_passes_parent_task_id():
         organization_id="org-1",
         project_id="proj-1",
         title="Child",
-        parent_task_id="parent-1",
+        parent_task_id="33333333-3333-4333-8333-333333333333",
     )
 
     assert result["parentTaskId"] == "parent-1"
-    assert client.request.await_args.kwargs["json_body"]["parentTaskId"] == "parent-1"
+    assert client.request.await_args.kwargs["json_body"]["parentTaskId"] == "33333333-3333-4333-8333-333333333333"
 
 
 def test_resolve_reparent_arguments_with_two_selected_tasks():
