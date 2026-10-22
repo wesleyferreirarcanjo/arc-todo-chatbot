@@ -1,6 +1,6 @@
 # Coolify — arc-todo Chatbot
 
-Python FastAPI chatbot service deployed in Coolify project **`arc-todo`** on server **`main`** (`72.60.59.203`).
+Python FastAPI chatbot service deployed in Coolify project **`arc-todo`** on server **`main`** (`201.23.65.113`).
 
 ## Project
 
@@ -21,7 +21,7 @@ Python FastAPI chatbot service deployed in Coolify project **`arc-todo`** on ser
 | Repository | [wesleyferreirarcanjo/arc-todo-chatbot](https://github.com/wesleyferreirarcanjo/arc-todo-chatbot) |
 | Branch | `master` |
 | Build pack | Dockerfile |
-| Public URL | `https://nyagev0aqp4qow1zri6wise5.72.60.59.203.sslip.io` |
+| Public URL | `https://nyagev0aqp4qow1zri6wise5.201.23.65.113.sslip.io` |
 | Health check | `GET /health` → `{ "status": "ok" }` |
 
 ### Build / run
@@ -36,7 +36,7 @@ Python FastAPI chatbot service deployed in Coolify project **`arc-todo`** on ser
 
 | Resource | UUID | Notes |
 | --- | --- | --- |
-| API `arc-todo-api` | `lmsx2avrg1k29ex12w6e3gce` | `https://lmsx2avrg1k29ex12w6e3gce.72.60.59.203.sslip.io` |
+| API `arc-todo-api` | `lmsx2avrg1k29ex12w6e3gce` | `https://lmsx2avrg1k29ex12w6e3gce.201.23.65.113.sslip.io` |
 | Frontend `arc-todo-web` | `ifo33mi1s8efs8myb5g441vh` | Chat UI at `/chat`, settings at `/settings/chatbot` |
 | MCP `arc-todo-mcp` | `qv9bek5he3ns8upu71rphbrc` | Shares the same Arc Todo API endpoints |
 | PostgreSQL `arc-todo-postgres-pgvector` | `x420nshn1p0cjzlhomi0cbnk` | Stores chatbot settings via API |
@@ -52,7 +52,7 @@ Secrets are stored in Coolify only. Do not commit real values.
 | `ARC_TODO_USERNAME` | Service account username |
 | `ARC_TODO_PASSWORD` | *(redacted — Coolify secret)* |
 | `ARC_TODO_ACCESS_TOKEN` | Optional bearer token instead of username/password |
-| `CORS_ORIGINS` | Frontend URL (`https://ifo33mi1s8efs8myb5g441vh.72.60.59.203.sslip.io`) |
+| `CORS_ORIGINS` | Frontend URL (`https://ifo33mi1s8efs8myb5g441vh.201.23.65.113.sslip.io`) |
 | `CHATBOT_SETTINGS_CACHE_SECONDS` | `60` |
 
 DeepSeek provider settings (`provider`, `baseUrl`, `model`, `apiKey`, `temperature`, `enabled`) are stored in PostgreSQL through `arc-todo-api` and loaded at runtime from `GET /chatbot-settings/runtime`.
