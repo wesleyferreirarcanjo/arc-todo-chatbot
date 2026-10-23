@@ -2,7 +2,25 @@ import pytest
 import respx
 from httpx import Response
 
-from app.chatbot_settings import ChatbotSettingsClient
+from app.chatbot_settings import ChatbotSettingsClient, ChatbotSettingsError
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_runtime_settings_requires_access_token(monkeypatch):
+    monkeypatch.setenv("ARC_TODO_API_BASE_URL", "http://api.test")
+    monkeypatch.delenv("ARC_TODO_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("ARC_TODO_USERNAME", "admin")
+    monkeypatch.setenv("ARC_TODO_PASSWORD", "secret")
+
+    login = respx.post("http://api.test/auth/login").mock(
+        return_value=Response(200, json={"access_token": "should-not-use"})
+    )
+
+    client = ChatbotSettingsClient()
+    with pytest.raises(ChatbotSettingsError, match="ARC_TODO_ACCESS_TOKEN"):
+        await client.get_runtime_settings(force_refresh=True)
+    assert login.called is False
 
 
 @pytest.mark.asyncio

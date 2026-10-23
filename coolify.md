@@ -49,9 +49,7 @@ Secrets are stored in Coolify only. Do not commit real values.
 | --- | --- |
 | `PORT` | `8010` |
 | `ARC_TODO_API_BASE_URL` | Public or internal API URL |
-| `ARC_TODO_USERNAME` | Service account username |
-| `ARC_TODO_PASSWORD` | *(redacted — Coolify secret)* |
-| `ARC_TODO_ACCESS_TOKEN` | Optional bearer token instead of username/password |
+| `ARC_TODO_ACCESS_TOKEN` | Required service JWT (no username/password fallback) |
 | `CORS_ORIGINS` | Frontend URL (`https://ifo33mi1s8efs8myb5g441vh.201.23.65.113.sslip.io`) |
 | `CHATBOT_SETTINGS_CACHE_SECONDS` | `60` |
 

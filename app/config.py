@@ -10,8 +10,6 @@ class Settings(BaseSettings):
 
     port: int = 8010
     arc_todo_api_base_url: str = "http://localhost:3000"
-    arc_todo_username: str | None = None
-    arc_todo_password: str | None = None
     arc_todo_access_token: str | None = None
     cors_origins: str = "http://localhost:5173"
     chatbot_settings_cache_seconds: int = 60
